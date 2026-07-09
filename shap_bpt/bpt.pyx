@@ -14,6 +14,8 @@ cimport numpy as cnp
 from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free
 from libc.math cimport sqrt, M_PI, log
 
+from libc.stdint cimport uint64_t
+
 ctypedef unsigned char uint8_t
 
 
@@ -22,6 +24,13 @@ cdef inline uint8_t UMIN(uint8_t a, uint8_t b):
 
 cdef inline uint8_t UMAX(uint8_t a, uint8_t b):
     return a if a > b else b
+
+#TODO: count 1 with SWAR
+cdef inline int popcount64(uint64_t x):
+    x = x - ((x >> 1) & <uint64_t>0x5555555555555555)
+    x = (x & <uint64_t>0x3333333333333333) + ((x >> 2) & <uint64_t>0x3333333333333333)
+    x = (x + (x >> 4)) & <uint64_t>0x0F0F0F0F0F0F0F0F
+    return <int>((x * <uint64_t>0x0101010101010101) >> 56)
 
 
 ######################################################################################################
@@ -141,7 +150,7 @@ cdef reverse_heap_update_weight(reverse_heap_t* p_heap, size_t elem, double w):
 
 ctypedef unsigned int cluster_t
 
-
+#TODO: ADDED MASK_BITS
 cdef struct cluster_descr:
     uint8_t minR, maxR
     uint8_t minG, maxG
@@ -149,6 +158,7 @@ cdef struct cluster_descr:
     size_t area
     size_t perimeter
     cluster_t root
+    uint64_t mask_bits
     int adjnext
 ctypedef cluster_descr cluster_descr_t
 
@@ -192,9 +202,14 @@ cdef class BinaryPartitionTreeBuilder:
     # Adjacency heap for fast merge
     cdef reverse_heap_t heap
     
+    #TODO: ADDED PREBUILD PARTITION
+    cdef object prebuilt_partitions
 
+    #TODO: ADDED INIT PREBUILD PARTITION
     def __init__(self, image, use_8ways=True,
-                 use_color_term=True, use_area_term=True, use_perim_term=True):
+                 use_color_term=True, use_area_term=True, use_perim_term=True, prebuilt_partitions=None ):
+        self.prebuilt_partitions = prebuilt_partitions 
+        
         self.use_8ways = use_8ways
 
         self.use_color_term = use_color_term
@@ -217,6 +232,7 @@ cdef class BinaryPartitionTreeBuilder:
         self.clst = <cluster_descr_t*> PyMem_Malloc(self.N * sizeof(cluster_descr_t))
         # initialize unitary clusters
         cdef size_t x, y, i
+        #TODO: initialize mask_bits
         for i in range(self.U):
             y = i // self.W
             x = i % self.W
@@ -227,7 +243,16 @@ cdef class BinaryPartitionTreeBuilder:
             self.clst[i].area = 1
             self.clst[i].perimeter = 4 
             self.clst[i].adjnext = -1
+            self.clst[i].mask_bits = 0
         self.TC = self.U
+        cdef cluster_t c0
+        #TODO: check prebuilt_partitions
+        if self.prebuilt_partitions is not None:
+            for x0 in range(<size_t>self.W):
+                for y0 in range(<size_t>self.H):
+                    c0 = <cluster_t>(y0*self.W + x0)
+                    self.clst[c0].mask_bits = 1 << self.prebuilt_partitions[y0, x0]
+
         # allocate non-unitary cluster branching descriptors
         self.branches = <cluster_t[2]*> PyMem_Malloc((self.N - self.U) * sizeof(cluster_t[2]))
         # initialize adjacency list
@@ -237,7 +262,6 @@ cdef class BinaryPartitionTreeBuilder:
         self.next_free_adj = 0
 
         # build initial 4/8-way adjacencies
-        cdef cluster_t c0
         for x0 in range(<size_t>self.W):
             for y0 in range(<size_t>self.H):
                 c0 = <cluster_t>(y0*self.W + x0)
@@ -373,6 +397,9 @@ cdef class BinaryPartitionTreeBuilder:
                                     2 * self.adjs[merged_adj].edge_length)
         self.clst[cAB].adjnext = -1
 
+        #TODO: MERGE
+        self.clst[cAB].mask_bits = (self.clst[cA].mask_bits | self.clst[cB].mask_bits)
+
         # make cAB the root of both cA and cB
         assert self.clst[cA].root==cA and self.clst[cB].root==cB # cA and cB are root nodes
         self.clst[cA].root = self.clst[cB].root = cAB 
@@ -464,11 +491,29 @@ cdef class BinaryPartitionTreeBuilder:
             reverse_heap_update_weight(&self.heap, a, self.get_adj_priority(a))            
             a = self.adjs[a].next[idx]
 
+    
     # compute the weight of an adjacency between two clusters
     cdef inline double get_adj_priority(self, int a):
         cdef int cl0 = self.adjs[a].cl[0]
         cdef int cl1 = self.adjs[a].cl[1]
         cdef double area_score, color_score, perim_score
+
+        #TODO: IoU
+        cdef double partition_iou
+        cdef uint64_t mask0 
+        cdef uint64_t mask1 
+        cdef int inter_count
+        cdef int union_count
+        if self.prebuilt_partitions is not None:
+            
+            mask0 = self.clst[cl0].mask_bits
+            mask1 = self.clst[cl1].mask_bits
+
+            inter_count = popcount64(mask0 & mask1) + 1
+            union_count = popcount64(mask0 | mask1) + 1
+            partition_iou = <double>inter_count / <double>union_count
+        else:
+            partition_iou = 1.0
 
         area_score = self.clst[cl0].area + self.clst[cl1].area
 
@@ -499,6 +544,11 @@ cdef class BinaryPartitionTreeBuilder:
             score *= area_score
         if self.use_perim_term:
             score *= sqrt(perim_score)
+        
+        #TODO:IoU
+        if self.prebuilt_partitions is not None:
+            score *= (1.0 - partition_iou)
+
         return score
 
 
