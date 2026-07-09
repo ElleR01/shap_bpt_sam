@@ -1,654 +1,659 @@
-# cython: language_level=3
-# cython: initializedcheck=False
-# cython: cdivision=True
-# cython: boundscheck=False
-# cython: nonecheck=False
-# cython: wraparound=False
-
-######################################################################################################
-# High-performance Binary Partition Tree builder.
-######################################################################################################
-
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+from queue import PriorityQueue
+from tqdm.auto import tqdm
 import numpy as np
-cimport numpy as cnp
-from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free
-from libc.math cimport sqrt, M_PI, log
-
-from libc.stdint cimport uint64_t
-
-ctypedef unsigned char uint8_t
-
-
-cdef inline uint8_t UMIN(uint8_t a, uint8_t b):
-    return a if a < b else b
-
-cdef inline uint8_t UMAX(uint8_t a, uint8_t b):
-    return a if a > b else b
-
-#TODO: count 1 with SWAR
-cdef inline int popcount64(uint64_t x):
-    x = x - ((x >> 1) & <uint64_t>0x5555555555555555)
-    x = (x & <uint64_t>0x3333333333333333) + ((x >> 2) & <uint64_t>0x3333333333333333)
-    x = (x + (x >> 4)) & <uint64_t>0x0F0F0F0F0F0F0F0F
-    return <int>((x * <uint64_t>0x0101010101010101) >> 56)
-
+import math, os
 
 ######################################################################################################
-# Heap with reverse indexing, which can alter the weight of the nodes dynamically
+# Shapley image explanations with data-dependent Binary Partition Trees
 ######################################################################################################
 
-cdef struct reverse_heap:
-    size_t N
-    double* W
-    size_t* heap
-    ssize_t* rev_heap
-    size_t heap_size
-
-ctypedef reverse_heap reverse_heap_t
-
-
-cdef void reverse_heap_initialize(reverse_heap_t* p_heap, size_t initN):
-    p_heap.N = initN
-    p_heap.W = <double*> PyMem_Malloc(p_heap.N * sizeof(double))
-    p_heap.heap = <size_t*> PyMem_Malloc(p_heap.N * sizeof(size_t))
-    p_heap.rev_heap = <ssize_t*> PyMem_Malloc(p_heap.N * sizeof(ssize_t))
-    p_heap.heap_size = 0
-    cdef size_t i
-    for i in range(p_heap.N):
-        p_heap.W[i] = -1
-        p_heap.rev_heap[i] = -1
-    
-cdef void reverse_heap_deallocate(reverse_heap_t* p_heap):
-    PyMem_Free(p_heap.W) ; p_heap.W = NULL
-    PyMem_Free(p_heap.heap) ; p_heap.heap = NULL
-    PyMem_Free(p_heap.rev_heap) ; p_heap.rev_heap = NULL
-
-cdef void reverse_heap_percolate_up(reverse_heap_t* p_heap, size_t i):
-    cdef size_t parent
-    while i > 0:
-        parent = ((i + 1) // 2) - 1
-        if p_heap.W[p_heap.heap[parent]] < p_heap.W[p_heap.heap[i]]:
-            break
-        p_heap.rev_heap[p_heap.heap[i]] = parent
-        p_heap.rev_heap[p_heap.heap[parent]] = i
-        p_heap.heap[i], p_heap.heap[parent] = p_heap.heap[parent], p_heap.heap[i]
-        i = parent
-        # reverse_heap_verify(p_heap)
-    # reverse_heap_verify(p_heap, True)
-
-cdef void reverse_heap_percolate_down(reverse_heap_t* p_heap, size_t i):
-    cdef size_t left, right
-    while True:
-        left = ((i + 1) * 2) - 1
-        right = left + 1
-        if right < p_heap.heap_size \
-                and p_heap.W[p_heap.heap[right]] < p_heap.W[p_heap.heap[left]] \
-                and p_heap.W[p_heap.heap[right]] < p_heap.W[p_heap.heap[i]]:
-            p_heap.rev_heap[p_heap.heap[i]] = right
-            p_heap.rev_heap[p_heap.heap[right]] = i
-            p_heap.heap[i], p_heap.heap[right] = p_heap.heap[right], p_heap.heap[i]
-            assert p_heap.W[p_heap.heap[i]] <= p_heap.W[p_heap.heap[right]] \
-                    and p_heap.W[p_heap.heap[i]] <= p_heap.W[p_heap.heap[left]]
-            i = right
-            # reverse_heap_verify(p_heap)
-        elif left < p_heap.heap_size and p_heap.W[p_heap.heap[left]] < p_heap.W[p_heap.heap[i]]:
-            p_heap.rev_heap[p_heap.heap[i]] = left
-            p_heap.rev_heap[p_heap.heap[left]] = i
-            p_heap.heap[i], p_heap.heap[left] = p_heap.heap[left], p_heap.heap[i]
-            assert p_heap.W[p_heap.heap[i]] <= p_heap.W[p_heap.heap[left]]
-            i = left
-            # reverse_heap_verify(p_heap)
-        else:
-            break
-    # reverse_heap_verify(p_heap, True)
-
-cdef void reverse_heap_percolate_up_or_down(reverse_heap_t* p_heap, size_t i):
-    cdef size_t parent = ((i + 1) // 2) - 1
-    if i != 0 and p_heap.W[p_heap.heap[parent]] > p_heap.W[p_heap.heap[i]]:
-        reverse_heap_percolate_up(p_heap, i)
-    else:
-        reverse_heap_percolate_down(p_heap, i)
-
-cdef reverse_heap_push(reverse_heap_t* p_heap, size_t elem, double w):
-    cdef size_t i = p_heap.heap_size
-    assert p_heap.rev_heap[elem] == -1
-    p_heap.rev_heap[elem] = i
-    p_heap.heap[p_heap.heap_size] = elem
-    p_heap.heap_size += 1
-    p_heap.W[elem] = w
-    # reverse_heap_verify(p_heap)
-    reverse_heap_percolate_up(p_heap, i)
-
-cdef reverse_heap_remove(reverse_heap_t* p_heap, size_t elem):
-    cdef ssize_t i = p_heap.rev_heap[elem]
-    assert i >= 0 and i < (<ssize_t>p_heap.heap_size)
-    p_heap.rev_heap[elem] = -1
-    p_heap.W[elem] = -1.0
-    if i == (<ssize_t>p_heap.heap_size) - 1:
-        p_heap.heap_size -= 1
-        # reverse_heap_verify(p_heap)
-    else:
-        p_heap.heap[i] = p_heap.heap[p_heap.heap_size-1]
-        p_heap.rev_heap[p_heap.heap[p_heap.heap_size-1]] = i
-        p_heap.heap_size -= 1
-        # reverse_heap_verify(p_heap)
-        reverse_heap_percolate_up_or_down(p_heap, i)
-
-cdef size_t reverse_heap_top(reverse_heap_t* p_heap):
-    return p_heap.heap[0]
-
-cdef size_t reverse_heap_size(reverse_heap_t* p_heap):
-    return p_heap.heap_size
-
-cdef reverse_heap_update_weight(reverse_heap_t* p_heap, size_t elem, double w):
-    cdef ssize_t i = p_heap.rev_heap[elem]
-    assert i >= 0 and i < (<ssize_t>p_heap.heap_size)
-    p_heap.W[elem] = w
-    reverse_heap_percolate_up_or_down(p_heap, i)
+# Cython implementation of the BPT algorithm
+from . import bpt as bpt
 
 ######################################################################################################
 
-ctypedef unsigned int cluster_t
+def mask2image(matrix, color):
+    h, w = matrix.shape
+    rgb_image = np.zeros((h, w, len(color)))
+    # Expand dimensions of color to match the shape of the matrix
+    color_expanded = np.expand_dims(np.array(color), axis=(0, 1))
+    # Multiply matrix with color along the third dimension
+    colored_matrix = matrix[..., np.newaxis] * color_expanded
+    # Clip values to ensure they are within [0, 1] range
+    colored_matrix = np.clip(colored_matrix, 0, 1)
+    return colored_matrix
 
-#TODO: ADDED MASK_BITS
-cdef struct cluster_descr:
-    uint8_t minR, maxR
-    uint8_t minG, maxG
-    uint8_t minB, maxB
-    size_t area
-    size_t perimeter
-    cluster_t root
-    uint64_t mask_bits
-    int adjnext
-ctypedef cluster_descr cluster_descr_t
-
-
-cdef struct adjacency_descr:
-    cluster_t cl[2]
-    int next[2]
-    int prev[2]
-    size_t edge_length
-ctypedef adjacency_descr adjacency_descr_t
+def hex_to_rgb(value):
+    value = value.lstrip('#')
+    lv = len(value)
+    return tuple(int(value[i:i + lv // 3], 16)/255.0 for i in range(0, lv, lv // 3))
 
 ######################################################################################################
-# Binary Partition Tree
-# Inspired by the algorithm of: 
-#  "AGAT: Building and evaluating binary partition trees for image segmentation"
+
+from matplotlib.colors import LinearSegmentedColormap
+
+# Custom colormap for Shapley values - similar to 'seismic' but with lighter tones.
+shapley_values_colormap = LinearSegmentedColormap.from_list("shapley_values_colormap", 
+                                                            [(0.0, '#0053d1'),
+                                                             (0.2, '#248df4'),
+                                                             (0.5, 'white'),  
+                                                             (0.8, '#f23754'),
+                                                             (1.0, '#cb0021')])
+
 ######################################################################################################
 
-cdef class BinaryPartitionTreeBuilder:
-    cdef size_t     H  # image height
-    cdef size_t     W  # image width
-    cdef size_t     C  # image channels
-    cdef cluster_t  U  # number of unitary clusters
-    cdef cluster_t  N  # number of total clusters
-    cdef cluster_t  TC # clusters built so far
+class BaseSegment:
+    """
+    Abstract base class representing a hierarchical image segment.
 
-    cdef bint       use_8ways
-    cdef bint       use_color_term
-    cdef bint       use_area_term
-    cdef bint       use_perim_term
-
-    # Cluster descriptors
-    cdef cluster_descr_t* clst
-    # Left and right clusters
-    cdef cluster_t[2]* branches
-    
-    # Adjacency descriptors
-    cdef int num_adjs
-    cdef adjacency_descr_t* adjs
-    cdef int next_free_adj
-
-    # Adjacency heap for fast merge
-    cdef reverse_heap_t heap
-    
-    #TODO: ADDED PREBUILD PARTITION
-    cdef object prebuilt_partitions
-
-    #TODO: ADDED INIT PREBUILD PARTITION
-    def __init__(self, image, use_8ways=True,
-                 use_color_term=True, use_area_term=True, use_perim_term=True, prebuilt_partitions=None ):
-        self.prebuilt_partitions = prebuilt_partitions 
+    Segments define regions of the image that can be recursively
+    partitioned and used as feature coalitions during Owen-value
+    estimation.
+    """
+    def __init__(self, parent=None):
+        self.parent = parent
         
-        self.use_8ways = use_8ways
+    def split(self):
+        raise Exception()
+    
+    def fill_mask(self, mat, ascend_hier=True):
+        return
+        
+    def add_inside_coalition(self, shap_values, contrib):
+        raise Exception()
 
-        self.use_color_term = use_color_term
-        self.use_area_term = use_area_term
-        self.use_perim_term = use_perim_term
+    def subtract_outside_coalition(self, shap_values, contrib):
+        raise Exception()
+        
+    def area(self):
+        raise Exception()
 
-        if image.dtype!=np.uint8:
-            raise Exception('Image pixel type is expected to be uint8.')
-        if len(image.shape)!=3:
-            raise Exception('Image shape is expected to be 3-dimensional.')
-        self.H  = image.shape[0]
-        self.W  = image.shape[1]
-        self.C  = image.shape[2]
-        if self.C!=3 and self.C!=1:
-            raise Exception('Image is expected to be RGB (H*W*3) or grayscale (H*W*1).')
+    def plot(self, ax, color=None):
+        raise Exception()
 
-        self.U = self.W * self.H
-        self.N = 2*self.U - 1
-        # allocate cluster descriptors
-        self.clst = <cluster_descr_t*> PyMem_Malloc(self.N * sizeof(cluster_descr_t))
-        # initialize unitary clusters
-        cdef size_t x, y, i
-        #TODO: initialize mask_bits
-        for i in range(self.U):
-            y = i // self.W
-            x = i % self.W
-            self.clst[i].minR = self.clst[i].maxR = image[y,x,0]
-            self.clst[i].minG = self.clst[i].maxG = image[y,x,1] if self.C==3 else 0
-            self.clst[i].minB = self.clst[i].maxB = image[y,x,2] if self.C==3 else 0
-            self.clst[i].root = i
-            self.clst[i].area = 1
-            self.clst[i].perimeter = 4 
-            self.clst[i].adjnext = -1
-            self.clst[i].mask_bits = 0
-        self.TC = self.U
-        cdef cluster_t c0
-        #TODO: check prebuilt_partitions
-        if self.prebuilt_partitions is not None:
-            for x0 in range(<size_t>self.W):
-                for y0 in range(<size_t>self.H):
-                    c0 = <cluster_t>(y0*self.W + x0)
-                    self.clst[c0].mask_bits = 1 << self.prebuilt_partitions[y0, x0]
+    def contains(self, aa):
+        raise Exception()
 
-        # allocate non-unitary cluster branching descriptors
-        self.branches = <cluster_t[2]*> PyMem_Malloc((self.N - self.U) * sizeof(cluster_t[2]))
-        # initialize adjacency list
-        self.num_adjs = (self.W-1)*(self.H-1)*(4 if self.use_8ways else 2) + self.W+self.H-2
-        self.adjs = <adjacency_descr_t*> PyMem_Malloc(self.num_adjs * sizeof(adjacency_descr_t))
-        reverse_heap_initialize(&self.heap, self.num_adjs)
-        self.next_free_adj = 0
+    def equals(self, aa):
+        raise Exception()
+    
+######################################################################################################
+# A symmetric, disjoint, axis-aligned, hierarchical partition 
+######################################################################################################
 
-        # build initial 4/8-way adjacencies
-        for x0 in range(<size_t>self.W):
-            for y0 in range(<size_t>self.H):
-                c0 = <cluster_t>(y0*self.W + x0)
-                self.init_adj(c0, x0+1, y0,   1) # right
-                self.init_adj(c0, x0,   y0+1, 1) # down
-                if self.use_8ways:
-                    self.init_adj(c0, x0+1, y0+1, 0) # bottom-right diagonal
-                    self.init_adj(c0, x0-1, y0+1, 0) # bottom-left diagonal
+class AxisAlignedSegment(BaseSegment):
+    """
+    Axis-aligned rectangular image segment.
 
-    def __dealloc__(self):
-        PyMem_Free(self.clst) ;      self.clst = NULL
-        PyMem_Free(self.branches) ;  self.branches = NULL
-        PyMem_Free(self.adjs) ;      self.adjs = NULL
-        reverse_heap_deallocate(&self.heap)
+    This partition strategy recursively splits image regions
+    along horizontal or vertical axes and serves as a baseline
+    hierarchy independent of image content.
+    """
+    def __init__(self, xmin, xmax, ymin, ymax, parent):
+        super().__init__(parent)
+        self.xmin = xmin
+        self.xmax = xmax
+        self.ymin = ymin
+        self.ymax = ymax
+        
+    #@override
+    def split(self, lparent, rparent):
+        size_x = self.xmax - self.xmin
+        size_y = self.ymax - self.ymin
+        assert size_x>=1 or size_y>=1
+        lxmin = rxmin = self.xmin
+        lxmax = rxmax = self.xmax
+        lymin = rymin = self.ymin
+        lymax = rymax = self.ymax
+        if size_x > size_y and size_x > 1: # split over x
+            lxmax = rxmin = (self.xmin + size_x // 2)
+        else: # split over y
+            lymax = rymin = (self.ymin + size_y // 2)
+        lsg = AxisAlignedSegment(lxmin, lxmax, lymin, lymax, lparent)
+        rsg = AxisAlignedSegment(rxmin, rxmax, rymin, rymax, rparent)
+        # print(f'split {self.area()} -> {lsg.area()} + {rsg.area()}    {self}')
+        return (lsg, rsg)
+    
+    #@override
+    def fill_mask(self, mat, ascend_hier=True):
+        mat[self.ymin:self.ymax, self.xmin:self.xmax] = True
+        if ascend_hier:
+            self.parent.fill_mask(mat, ascend_hier) 
+        
+    #@override
+    def add_inside_coalition(self, shap_values, contrib):
+        contrib = contrib / self.area()
+        for c in range(len(contrib)):
+            shap_values[c, self.ymin:self.ymax, self.xmin:self.xmax] += contrib[c]
 
-
-    # add an initial adjacency link between cluster c0 and the cluster 
-    # in (x1,y1), if such position is valid.
-    cdef void init_adj(self, cluster_t c0, int x1, int y1, size_t edge_length):
-        if x1<0 or x1>=(<int>self.W) or y1<0 or y1>=(<int>self.H):
+    #@override
+    def subtract_outside_coalition(self, shap_values, contrib):
+        if shap_values[0].size==self.area():
             return
-        cdef cluster_t c1 = <cluster_t>(y1*self.W + x1)
-        assert c0 < c1
-        assert 0 <= c0 <= self.TC and 0 <= c1 <= self.TC #, f'c0={c0}, c1={c1}, TC={self.TC}'
-        # get next free adjacency node
-        cdef int a = self.next_free_adj 
-        self.next_free_adj += 1
-        assert self.next_free_adj <= self.num_adjs
-        self.adjs[a].edge_length = edge_length
-        # link to both clusters
-        self.adjs[a].cl[0] = c0
-        self.adjs[a].cl[1] = c1
-
-        self.add_adjacency_to(c0, a)
-        self.add_adjacency_to(c1, a)
+        contrib = contrib / (shap_values[0].size - self.area())
+        for c in range(len(contrib)):
+            shap_values[c, :self.ymin, :] -= contrib[c]
+            shap_values[c, self.ymax:, :] -= contrib[c]
+            shap_values[c, self.ymin:self.ymax, :self.xmin] -= contrib[c]
+            shap_values[c, self.ymin:self.ymax, self.xmax:] -= contrib[c]
         
-        reverse_heap_push(&self.heap, a, self.get_adj_priority(a))
-
-
-    # insert the adjacency @a to the linked list of cluster @cl 
-    # finding the right position (must keep descending order
-    # of the opposite connected cluster ids).
-    cdef void add_adjacency_to(self, cluster_t c0, int a):
-        cdef int idx, other_idx, next_a, next_idx, other_next_idx, prev_a=-1, prev_idx=-1
-        idx = 0 if self.adjs[a].cl[0]==c0 else 1
-        assert self.adjs[a].cl[idx]==c0
-        other_idx = 0 if idx==1 else 1
-
-        next_a, next_idx = self.clst[c0].adjnext, -1
-        while next_a >= 0:
-            next_idx = 0 if self.adjs[next_a].cl[0]==c0 else 1
-            assert self.adjs[next_a].cl[next_idx]==c0
-            other_next_idx = 0 if next_idx==1 else 1
-            # keep descending order w.r.t. the connected clusters
-            if self.adjs[next_a].cl[other_next_idx] < self.adjs[a].cl[other_idx]:
-                break 
-            prev_a, prev_idx = next_a, next_idx
-            next_a = self.adjs[next_a].next[next_idx]
-
-        # insert a between prev_a and next_a
-        self.adjs[a].prev[idx] = prev_a
-        if prev_a==-1: # insert as head
-            self.clst[c0].adjnext = a
-        else:
-            self.adjs[prev_a].next[prev_idx] = a
-
-        self.adjs[a].next[idx] = next_a
-        if next_a!=-1:
-            self.adjs[next_a].prev[next_idx] = a
-
-
-    # remove node @a from the linked list of cluster @c0
-    cdef inline void unlink_adj(self, cluster_t c0, int a):
-        cdef int idx, next_a, next_idx, prev_a, prev_idx
-        idx = 0 if self.adjs[a].cl[0]==c0 else 1
-        assert self.adjs[a].cl[idx]==c0
-
-        prev_a, next_a = self.adjs[a].prev[idx], self.adjs[a].next[idx]
-
-        if prev_a == -1:
-            self.clst[c0].adjnext = self.adjs[a].next[idx]
-        else:
-            prev_idx = 0 if self.adjs[prev_a].cl[0]==c0 else 1
-            self.adjs[prev_a].next[prev_idx] = next_a
-
-        if next_a != -1:
-            next_idx = 0 if self.adjs[next_a].cl[0]==c0 else 1
-            self.adjs[next_a].prev[next_idx] = prev_a
-
-        self.adjs[a].prev[idx], self.adjs[a].next[idx] = -1, -1
-
-
-    # insert node @a to the head of the linked list of cluster @c0
-    cdef inline void relink_adj_head(self, cluster_t c0, int a):
-        cdef int idx, next_a, next_idx, prev_a, prev_idx
-        idx = 0 if self.adjs[a].cl[0]==c0 else 1
-        assert self.adjs[a].cl[idx]==c0
-
-        assert self.adjs[a].next[idx] == -1 and self.adjs[a].prev[idx] == -1
-
-        if self.clst[c0].adjnext == -1:
-            self.clst[c0].adjnext = a
-        else:
-            next_a = self.clst[c0].adjnext
-            next_idx = 0 if self.adjs[next_a].cl[0]==c0 else 1
-            self.clst[c0].adjnext = a
-            self.adjs[a].next[idx] = next_a
-            self.adjs[next_a].prev[next_idx] = a
-
-
-    # build a new cluster by merging two adjacent ones
-    # implemented as a DSO - disjount set union - using union-find structure
-    cdef inline void merge(self, int merged_adj):
-        cdef cluster_t cA = self.adjs[merged_adj].cl[0]
-        cdef cluster_t cB = self.adjs[merged_adj].cl[1]
-        # print()
-        # self.check_list_order(cA)
-        # self.check_list_order(cB)
-        # print(f'merge {merged_adj}: {cA} {cB}: ', end='', flush=True)
-        cdef cluster_t cAB = self.TC # create the new root
-        self.TC += 1
-        assert self.TC <= self.N
-        self.clst[cAB].minR = UMIN(self.clst[cA].minR, self.clst[cB].minR)
-        self.clst[cAB].maxR = UMAX(self.clst[cA].maxR, self.clst[cB].maxR)
-        self.clst[cAB].minG = UMIN(self.clst[cA].minG, self.clst[cB].minG)
-        self.clst[cAB].maxG = UMAX(self.clst[cA].maxG, self.clst[cB].maxG)
-        self.clst[cAB].minB = UMIN(self.clst[cA].minB, self.clst[cB].minB)
-        self.clst[cAB].maxB = UMAX(self.clst[cA].maxB, self.clst[cB].maxB)
-        self.clst[cAB].root = cAB
-        self.clst[cAB].area = self.clst[cA].area + self.clst[cB].area
-        self.clst[cAB].perimeter = (self.clst[cA].perimeter + 
-                                    self.clst[cB].perimeter -
-                                    2 * self.adjs[merged_adj].edge_length)
-        self.clst[cAB].adjnext = -1
-
-        #TODO: MERGE
-        self.clst[cAB].mask_bits = (self.clst[cA].mask_bits | self.clst[cB].mask_bits)
-
-        # make cAB the root of both cA and cB
-        assert self.clst[cA].root==cA and self.clst[cB].root==cB # cA and cB are root nodes
-        self.clst[cA].root = self.clst[cB].root = cAB 
-        self.branches[cAB - self.U][0] = cA
-        self.branches[cAB - self.U][1] = cB
-
-        # remove merged_adj from the linked lists of both clusters cA and cB
-        reverse_heap_remove(&self.heap, merged_adj)
-        self.unlink_adj(cA, merged_adj)
-        self.unlink_adj(cB, merged_adj)
-        self.adjs[merged_adj].cl[0] = self.adjs[merged_adj].cl[1] = <cluster_t>-1
-
-        # merge the remaining linked lists of cA and cB into the new list of cAB
-        # keep the descending order, remove all links between internal nodes
-        cdef int a, idx, other_idx, lstA, lstB
-        cdef int idxA=-1, other_idxA=-1, idxB=-1, other_idxB=-1
-        cdef int tailAB=-1, idxAB=-1, prev_a=-1
-        cdef bint pickA
-        cdef cluster_t thisC, otherC, prev_cl=<cluster_t>-1
-        lstA = self.clst[cA].adjnext
-        lstB = self.clst[cB].adjnext
-        self.clst[cA].adjnext = self.clst[cB].adjnext = -1 # unlink the adjacencies
-        while lstA!=-1 or lstB!=-1:
-            # pick the list with the smallest "other cluster id"
-            if lstA!=-1:
-                idxA = 0 if self.adjs[lstA].cl[0]==cA else 1
-                assert self.adjs[lstA].cl[idxA]==cA
-                other_idxA = 0 if idxA==1 else 1
-            if lstB!=-1:
-                idxB = 0 if self.adjs[lstB].cl[0]==cB else 1
-                assert self.adjs[lstB].cl[idxB]==cB
-                other_idxB = 0 if idxB==1 else 1
-
-            if lstA!=-1 and lstB==-1:
-                pickA = True
-            elif lstA==-1 and lstB!=-1:
-                pickA = False
-            else:
-                pickA = (self.adjs[lstA].cl[other_idxA] >= self.adjs[lstB].cl[other_idxB])
-
-            if pickA: # pick from A
-                a, idx, other_idx = lstA, idxA, other_idxA
-                thisC, otherC = cA, cB
-                lstA = self.adjs[lstA].next[idxA]
-            else: # pick from B
-                a, idx, other_idx = lstB, idxB, other_idxB
-                thisC, otherC = cB, cA
-                lstB = self.adjs[lstB].next[idxB]
-
-            assert self.adjs[a].cl[other_idx]!=otherC
-
-            if prev_cl!=<cluster_t>-1 and self.adjs[a].cl[other_idx]>=prev_cl: 
-                # redundant node, free 
-                assert self.adjs[a].cl[other_idx]==prev_cl
-                self.adjs[prev_a].edge_length += self.adjs[a].edge_length
-                self.unlink_adj(self.adjs[a].cl[other_idx], a)
-                # remove from the list of adjacencies that can be merged
-                reverse_heap_remove(&self.heap, a)
-                # invalidate the adjacency
-                self.adjs[a].cl[0] = self.adjs[a].cl[1] = <cluster_t>-1
-                self.adjs[a].next[0] = self.adjs[a].next[1] = -1
-                self.adjs[a].prev[0] = self.adjs[a].prev[1] = -1
-                self.adjs[a].edge_length = <size_t>-1
-            else: 
-                # link to the cAB list
-                self.adjs[a].cl[idx] = cAB
-                if tailAB==-1: # first node, make the head
-                    self.adjs[a].next[idx] = self.clst[cAB].adjnext
-                    self.adjs[a].prev[idx] = -1
-                    self.clst[cAB].adjnext = a
-                    tailAB, idxAB = a, idx
-                else: # append to the tail
-                    self.adjs[tailAB].next[idxAB] = a
-                    self.adjs[a].next[idx] = -1
-                    self.adjs[a].prev[idx] = tailAB
-                    tailAB, idxAB = a, idx
-                prev_cl = self.adjs[a].cl[other_idx]
-                prev_a = a
-                # since the linked node passes from thisC to cAB, it needs to be moved
-                # to the tail of the linked list of the other adjacent cluster.
-                self.unlink_adj(self.adjs[a].cl[other_idx], a)
-                self.relink_adj_head(self.adjs[a].cl[other_idx], a)
-
-        # finally, update all heap weights for all edges in the perimeter of cluster cAB
-        a = self.clst[cAB].adjnext
-        while a >= 0:
-            idx = 0 if self.adjs[a].cl[0]==cAB else 1
-            assert self.adjs[a].cl[idx]==cAB
-            reverse_heap_update_weight(&self.heap, a, self.get_adj_priority(a))            
-            a = self.adjs[a].next[idx]
-
+    #@override
+    def area(self):
+        return (self.xmax - self.xmin) * (self.ymax - self.ymin)
     
-    # compute the weight of an adjacency between two clusters
-    cdef inline double get_adj_priority(self, int a):
-        cdef int cl0 = self.adjs[a].cl[0]
-        cdef int cl1 = self.adjs[a].cl[1]
-        cdef double area_score, color_score, perim_score
+    #@override
+    def plot(self, ax, color=(.3,.7,1.0)):
+        ax.add_patch(Rectangle((self.xmin, self.ymin), 
+                               self.xmax-self.xmin, self.ymax-self.ymin, 
+                               facecolor=color, fill=True, lw=None))
 
-        #TODO: IoU
-        cdef double partition_iou
-        cdef uint64_t mask0 
-        cdef uint64_t mask1 
-        cdef int inter_count
-        cdef int union_count
-        if self.prebuilt_partitions is not None:
-            
-            mask0 = self.clst[cl0].mask_bits
-            mask1 = self.clst[cl1].mask_bits
+    #@override
+    def contains(self, aa):
+        return (self.xmin <= aa.xmin and aa.xmax <= self.xmax and
+                self.ymin <= aa.ymin and aa.ymax <= self.ymax)
 
-            inter_count = popcount64(mask0 & mask1) + 1
-            union_count = popcount64(mask0 | mask1) + 1
-            partition_iou = <double>inter_count / <double>union_count
+    #@override
+    def equals(self, aa):
+        return (self.xmin == aa.xmin and aa.xmax == self.xmax and
+                self.ymin == aa.ymin and aa.ymax == self.ymax)        
+
+######################################################################################################
+# Binary Partition Tree reader (using the code of the AGAT-Team)
+######################################################################################################
+
+class BPT:
+    """
+    Binary Partition Tree representation.
+
+    Stores the hierarchical region structure generated by the
+    BinaryPartitionTreeBuilder and provides utilities for
+    traversal, serialization, and visualization.
+    """
+    def __init__(self):
+        self.width = self.height = -1
+        self.N = self.U = 0
+        self.pixels = None
+        self.leaf_idx = None
+        self.cl_start = self.cl_end = None
+        self.cl_left = self.cl_right = None
+
+    def load_from_file(self, bpt_fname):
+        with open(bpt_fname, 'r') as f:
+            self.width = int(f.readline())
+            self.height = int(f.readline())
+            self.U = int(f.readline())
+            self.N = int(f.readline())
+            self.pixels = np.array([int(n) for n in f.readline().split()])
+            self.leaf_idx = np.array([int(n) for n in f.readline().split()])
+            self.cl_start = np.array([int(n) for n in f.readline().split()])
+            self.cl_end = np.array([int(n) for n in f.readline().split()])
+            self.cl_left = np.array([int(n) for n in f.readline().split()])
+            self.cl_right = np.array([int(n) for n in f.readline().split()])
+
+    def from_bpt_builder(self, bpt_builder):
+        enc = bpt_builder.encode()
+        (self.width, self.height, self.U, self.N, 
+         self.pixels, self.leaf_idx,
+         self.cl_start, self.cl_end,
+         self.cl_left, self.cl_right) = enc
+
+    def print_tree(self, index=None, lvl=0):
+        if index is None: index = self.N-1
+        print(' ' * lvl, end='')
+        print(f'index={index} ', end='')
+        if index < self.U: # leaf node
+            pass
+            # print(f' pixel {self.pixels[index]}')
         else:
-            partition_iou = 1.0
+            s = self.cl_start[ index - self.U ]
+            e = self.cl_end[ index - self.U ]
+            l, r = self.cl_left[ index - self.U ], self.cl_right[ index - self.U ]
+            al = 1 if l < self.U else self.cl_end[ l - self.U ] - self.cl_start[ l - self.U ]
+            ar = 1 if r < self.U else self.cl_end[ r - self.U ] - self.cl_start[ r - self.U ]
+            print(f'  {e-s} -> {al} + {ar}    left={l} right={r}')
+            self.print_tree(self.cl_left[ index - self.U ], lvl+1)
+            self.print_tree(self.cl_right[ index - self.U ], lvl+1)
 
-        area_score = self.clst[cl0].area + self.clst[cl1].area
+######################################################################################################
 
-        assert (self.clst[cl0].perimeter + self.clst[cl1].perimeter > 
-                2 * self.adjs[a].edge_length)
+def add_noise(img, sigma=1.0, alpha=0.5):
+    from scipy.ndimage import gaussian_filter
+    assert 0.0 <= alpha <= 1.0
+    rndgen = np.random.Generator(np.random.PCG64(1234))
+    img_noise = rndgen.standard_normal(size=img.shape)*64.0 + 128.0
+    img_noise = gaussian_filter(img_noise, sigma=1.0)
+    img = np.clip(img*alpha + img_noise*(1.0-alpha), 0.0, 255.0)
+    return img
 
-        perim_score = (self.clst[cl0].perimeter + self.clst[cl1].perimeter - 
-                       2 * self.adjs[a].edge_length)
+######################################################################################################
 
-        cdef int rangeR = (UMAX(self.clst[cl0].maxR, self.clst[cl1].maxR) - 
-                           UMIN(self.clst[cl0].minR, self.clst[cl1].minR) + <int>1);
-        cdef int rangeG = (UMAX(self.clst[cl0].maxG, self.clst[cl1].maxG) - 
-                           UMIN(self.clst[cl0].minG, self.clst[cl1].minG) + <int>1);
-        cdef int rangeB = (UMAX(self.clst[cl0].maxB, self.clst[cl1].maxB) - 
-                           UMIN(self.clst[cl0].minB, self.clst[cl1].minB) + <int>1);
+def image_rgb2lab(rgb_image):
+    from skimage.color import rgb2lab
+    lab_image = rgb2lab(rgb_image)# / 255.0)
+    # The ranges of Lab values are: L (0:100), a (-128:127), b (-128:127)
+    lab_image_scaled = (lab_image + [0, 128, 128]) * (255.0/100.0, 255.0/256.0, 255.0/256.0)
+    return lab_image_scaled.astype(np.uint8)
 
-        assert 1<=rangeR<=256 and 1<=rangeG<=256 and 1<=rangeB<=256
+######################################################################################################
 
-        color_score = (rangeR**2 + rangeG**2 + rangeB**2)
+# input image is expected to be of type uint8, with shape H*W*3 or H*W*1
+def build_bpt_from_image(image, use_lab=True, **kwargs):
+    """
+    Build a Binary Partition Tree from an input image.
 
-        # return color_score * area_score * sqrt(perim_score)
+    Parameters
+    ----------
+    image : np.ndarray
+        Input image with dtype `uint8`. Accepted shapes are `(H, W)`,
+        `(H, W, 1)`, or `(H, W, 3)`.
+    use_lab : bool, default=True
+        If True, converts RGB images to Lab color space before building the BPT.
+        Lab space often gives more perceptually meaningful image partitions.
+    **kwargs
+        Additional keyword arguments passed to `BinaryPartitionTreeBuilder`.
 
-        # for ablation study
-        cdef double score = 1.0
-        if self.use_color_term:
-            score *= color_score
-        if self.use_area_term:
-            score *= area_score
-        if self.use_perim_term:
-            score *= sqrt(perim_score)
-        
-        #TODO:IoU
-        if self.prebuilt_partitions is not None:
-            score *= (1.0 - partition_iou)
+    Returns
+    -------
+    BPT
+        A Binary Partition Tree object containing the image hierarchy.
 
-        return score
+    Raises
+    ------
+    TypeError
+        If the image dtype is not `uint8`.
+    ValueError
+        If the image shape is not supported.
+    """
+    if image.dtype!=np.uint8:
+        raise Exception('Image pixel type is expected to be uint8.')
+    if len(image.shape)==2:
+        image = image.reshape((image.shape[0], image.shape[1], 1))
+    if len(image.shape)!=3:
+        raise Exception('Image shape is expected to be 3-dimensional.')
+    if image.shape[2]!=3 and image.shape[2]!=1:
+        raise Exception('Image is expected to be RGB (H*W*3) or grayscale (H*W*1).')
 
+    if use_lab:
+        image = image_rgb2lab(image)
 
-    def get_cluster_of_xy(self, x, y):
-        cdef cluster_t cl = y*self.W + x
-        return self.get_cluster_of(cl)
+    bpt_builder = bpt.BinaryPartitionTreeBuilder(image=image, **kwargs)
+    bpt_builder.compute()
+    bptree = BPT()
+    bptree.from_bpt_builder(bpt_builder)
+    del bpt_builder
+    return bptree
 
+######################################################################################################
+# A non-symmetric, disjoint, hierarchical partition of a Binary Partition Tree node
+######################################################################################################
 
-    def get_cluster_of(self, cluster_t cl):
-        assert cl <= self.TC
-        while self.clst[cl].root != cl:
-            cl = self.clst[cl].root
-        return cl
+class BPT_Segment(BaseSegment):
+    """
+    Segment corresponding to a node of a Binary Partition Tree.
 
+    Each segment represents a connected image region and can
+    be recursively split into its left and right children
+    according to the tree structure.
+    """
+    def __init__(self, bpt, index, parent):
+        super().__init__(parent)
+        self.bpt = bpt
+        self.index = index
 
-    def merge_adjacency(self, merged_adj):
-        return self.merge(merged_adj)
-
-
-    def get_adjacency_to_merge(self):
-        if reverse_heap_size(&self.heap) == 0:
+    #@override
+    def split(self, lparent, rparent):
+        if self.area() == 1:
             return None
-        a = reverse_heap_top(&self.heap)
-        return a
+        ls = BPT_Segment(self.bpt, self.bpt.cl_left[ self.index - self.bpt.U ], lparent)
+        rs = BPT_Segment(self.bpt, self.bpt.cl_right[ self.index - self.bpt.U ], rparent)
+        return (ls, rs)
     
+    #@override
+    def fill_mask(self, mat, ascend_hier=True):
+        s,e = self.pixels_interval()
+        mat.ravel()[ self.bpt.pixels[s:e] ] = True
+        if ascend_hier:
+            self.parent.fill_mask(mat, ascend_hier)
+            
+    #@override
+    def add_inside_coalition(self, shap_values, contrib):
+        contrib = contrib / self.area()
+        s,e = self.pixels_interval()
+        for c in range(len(contrib)):
+            shap_values[c].ravel()[ self.bpt.pixels[s:e] ] += contrib[c]
 
-    def get_adjacency(self, cl):
-        assert cl <= self.TC and self.clst[cl].root == cl
-        lst = []
-        cdef int a, idx, other_idx
-        a = self.clst[cl].adjnext
-        while a>= 0:
-            idx = 0 if self.adjs[a].cl[0]==cl else 1
-            assert self.adjs[a].cl[idx]==cl
-            other_idx = 0 if idx==1 else 1
-            lst.append(self.adjs[a].cl[other_idx])
-            a = self.adjs[a].next[idx]
-        return lst
+    #@override
+    def subtract_outside_coalition(self, shap_values, contrib):
+        if shap_values[0].size==self.area():
+            return
+        contrib = contrib / (shap_values[0].size - self.area())
+        s,e = self.pixels_interval()
+        for c in range(len(contrib)):
+            shap_values[c].ravel()[ self.bpt.pixels[:s] ] -= contrib[c]
+            shap_values[c].ravel()[ self.bpt.pixels[e:] ] -= contrib[c]
+         
+    #@override
+    def plot(self, ax, color=(.3,.7,1.0)):
+        img = np.zeros((self.bpt.width, self.bpt.height), dtype=np.int8)
+        self.fill_mask(img, ascend_hier=False)
+        ax.imshow(mask2image(img, color))
+
+    #@override
+    def area(self):
+        s,e = self.pixels_interval()
+        return float(e - s)
+
+    #@override
+    def pixels_interval(self):
+        if self.index < self.bpt.U: # leaf node
+            return (self.bpt.leaf_idx[self.index], 
+                    self.bpt.leaf_idx[self.index] + 1)
+        else:
+            return (self.bpt.cl_start[ self.index - self.bpt.U ],
+                    self.bpt.cl_end[ self.index - self.bpt.U ])
+
+    #@override
+    def contains(self, other):
+        s1, e1 = self.pixels_interval()
+        s2, e2 = other.pixels_interval()
+        return s1 <= s2 and e2 <= e1
+
+    #@override
+    def equals(self, other):
+        s1, e1 = self.pixels_interval()
+        s2, e2 = other.pixels_interval()
+        return s1 == s2 and e2 == e1
+
+######################################################################################################
+# A partition of the features, refined by recursive splitting
+# A coalition that is part of the global coalition structure
+######################################################################################################
+
+class Coalition:
+    """
+    Coalition used during recursive Owen-value estimation.
+
+    A coalition stores a segment, associated model predictions,
+    and the recursive weight required to compute hierarchical
+    Shapley values.
+    """
+    def __init__(self, explainer, segment, f_SuAB, f_S, weight):
+        self.segment = segment  # segment for recursive refinement
+        self.f_SuAB = f_SuAB    # contribution with this coalition AB
+        self.f_S = f_S          # contribution without this coalition AB
+        self.weight = weight    # recursive weight of the Owen formula
+        # priority to be split for further partition refinements
+        self.priority = -np.max(np.abs(np.subtract(self.f_SuAB, self.f_S))) * self.weight 
+        if explainer.balance_area:
+            self.priority *= self.segment.area()
     
+    def prepare_split(self, explainer):
+        # split the current coalition AB into two separate coalitions {A,B}
+        coS_A,   coS_B   = self.segment.split(self.segment.parent, self.segment.parent)
+        coSuB_A, coSuA_B = self.segment.split(coS_B, coS_A) # flip parents
+        assert self.segment.area() == coS_A.area() + coS_B.area()
+        
+        # build the new masks
+        m_SuA, m_SuB = explainer.empty_mask(), explainer.empty_mask()
+        coS_A.fill_mask(m_SuA)
+        coS_B.fill_mask(m_SuB)
+                
+        # [f_SuA, f_SuB] = predictions using masks [m_SuA, m_SuB]
+        def split_completer(f_SuA, f_SuB):
+            # generate the four recursive branches
+            phiSuA_S    = Coalition(explainer, coS_A,   f_SuA,       self.f_S, self.weight/2.0)
+            phiSuB_S    = Coalition(explainer, coS_B,   f_SuB,       self.f_S, self.weight/2.0)
+            phiSuAB_SuA = Coalition(explainer, coSuA_B, self.f_SuAB, f_SuA,    self.weight/2.0)
+            phiSuAB_SuB = Coalition(explainer, coSuB_A, self.f_SuAB, f_SuB,    self.weight/2.0)
+            splits = [phiSuA_S, phiSuB_S, phiSuAB_SuA, phiSuAB_SuB]
+            return splits
 
-    # build the BPT
-    def compute(self):
-        cdef int a
-        # built the BPT by pairwise-merging clusters, in increasing adjacency weight order
-        while reverse_heap_size(&self.heap) > 0:
-            a = reverse_heap_top(&self.heap)
-            # print(f'merge {self.adjs[a].cl[0]}, {self.adjs[a].cl[1]}')
-            self.merge(a)
-            # self.merge(self.adjs[a].cl[0], self.adjs[a].cl[1])
-        assert self.N == self.TC
+        return (m_SuA, m_SuB, split_completer)
+        
+    def plot(self, ax, explainer, color=(1, 0, 0, 1)):
+        m00 = explainer.empty_mask()
+        self.segment.parent.fill_mask(m00)
+        ax.imshow(mask2image(m00, color))
+        ax.axis('off')
+        self.segment.plot(ax)
+    
+    def __lt__(self, other):
+        return self.priority < other.priority
+    
+    def get_shapley(self, shap_values): 
+        # compute the weighted marginals and add them to the partition
+        contrib = (np.subtract(self.f_SuAB, self.f_S) * self.weight)
+        self.segment.add_inside_coalition(shap_values, contrib)
 
+######################################################################################################
+# Explainer object. Implementation of the recursive refinement following Owen formula
+######################################################################################################
 
-    # BPT recursive encoding data structures
-    cdef cnp.ndarray pixels
-    cdef cnp.ndarray leaf_idx
-    cdef cnp.ndarray cl_start
-    cdef cnp.ndarray cl_end
-    cdef cnp.ndarray cl_left
-    cdef cnp.ndarray cl_right
-    cdef size_t pixel_counter
+class Explainer:
+    """
+    Generate ShapBPT explanations for an image and black-box model.
 
+    The explainer estimates Owen/Shapley values over a hierarchical image
+    partition. The hierarchy can be either image-adaptive, using a Binary
+    Partition Tree, or axis-aligned, using recursive rectangular splits.
 
-    # build an encoded representation of the hierarchical clusters
-    def encode(self):
-        self.pixels   = cnp.ndarray(shape=(self.U), dtype=np.uint32)
-        self.leaf_idx = cnp.ndarray(shape=(self.U), dtype=np.uint32)
-        self.cl_start = cnp.ndarray(shape=(self.N - self.U), dtype=np.uint32)
-        self.cl_end   = cnp.ndarray(shape=(self.N - self.U), dtype=np.uint32)
-        self.cl_left  = cnp.ndarray(shape=(self.N - self.U), dtype=np.uint32)
-        self.cl_right = cnp.ndarray(shape=(self.N - self.U), dtype=np.uint32)
-        self.pixel_counter = 0
+    Parameters
+    ----------
+    fm : callable
+        Black-box prediction function. It must accept a batch of boolean masks
+        with shape `(N, H, W)` and return prediction scores.
+    image_to_explain : np.ndarray
+        Input image to explain.
+    num_explained_classes : int
+        Number of top predicted classes to explain.
+    balance_area : bool, default=False
+        If True, prioritizes larger/high-impact regions during recursive
+        refinement.
+    verbose : bool, default=False
+        If True, shows a progress bar during explanation.
+    """
+    def __init__(self, fm, image_to_explain, num_explained_classes, balance_area=False, verbose=False):
+        self.fm = fm # black box predictor with masker
+        self.image_to_explain = image_to_explain
+        self.num_explained_classes = num_explained_classes
+        self.balance_area = balance_area
+        # foreground prediction (no masking, original input)
+        ym = self.fm(np.array([np.ones((self.image_to_explain.shape[0], 
+                                        self.image_to_explain.shape[1]), dtype=bool)]))[0]
+        self.output_indexes = np.flip(np.argsort(ym))[:self.num_explained_classes]
+        self.base_f_S = np.array([float(ym[i]) for i in self.output_indexes])
+        # background prediction (everything masked)
+        ym = self.fm(np.array([np.zeros((self.image_to_explain.shape[0], 
+                                         self.image_to_explain.shape[1]), dtype=bool)]))[0]
+        self.base_f_0 = np.array([float(ym[i]) for i in self.output_indexes])
+        self.verbose = verbose
 
-        self.visit_tree(self.TC - 1)
+    def empty_mask(self, dtype=bool):
+        return np.zeros((self.image_to_explain.shape[0], 
+                         self.image_to_explain.shape[1]), dtype=dtype)
+    
+    # get an explanation of the image_to_explain masked by @boolMask
+    def predict_masked(self, masks):
+        rows = self.fm(np.array(masks))
+        f = [[float(ym[i]) for i in self.output_indexes] for ym in rows]
+        return np.array(f)
+    
+    # get the Owen/Shapley coefficients
+    def explain_instance(self, max_evals, method='BPT', bpt=None,
+                         batch_size=64, verbose_plot=False, pbar=None,
+                         min_area=1, max_weight=None):
+        """
+        Compute Owen/Shapley attribution maps for the image.
 
-        return (self.W, self.H, self.U, self.N, 
-                self.pixels, self.leaf_idx,
-                self.cl_start, self.cl_end,
-                self.cl_left, self.cl_right)
+        Parameters
+        ----------
+        max_evals : int
+            Maximum number of model evaluations allowed.
+        method : {"BPT", "AA"}, default="BPT"
+            Partition strategy. `"BPT"` uses image-adaptive Binary Partition Trees;
+            `"AA"` uses axis-aligned rectangular splits.
+        bpt : BPT, optional
+            Precomputed Binary Partition Tree. If None and method is `"BPT"`,
+            a new tree is built from `image_to_explain`.
+        batch_size : int, default=64
+            Number of masks evaluated per model call batch.
+        verbose_plot : bool, default=False
+            If True, plots intermediate coalition splits.
+        pbar : tqdm progress bar, optional
+            External progress bar object.
+        min_area : int, default=1
+            Minimum segment area. Segments with area <= `min_area` are not split.
+        max_weight : float, optional
+            Stop splitting coalitions whose recursive weight is below this value.
 
+        Returns
+        -------
+        np.ndarray
+            Attribution tensor with shape `(num_explained_classes, H, W)`.
+        """
+        assert min_area >= 1
+        shap_values = np.zeros((self.num_explained_classes, 
+                                self.image_to_explain.shape[0], 
+                                self.image_to_explain.shape[1]))
+        if method=='BPT':
+            if bpt is None:
+                bpt = build_bpt_from_image(self.image_to_explain)
+            # assert bpt is not None, 'Expected argoment bpt='
+            init_coalition = self.init_bpt(bpt)
+        elif method=='AA':
+            init_coalition = self.init_axisaligned()
+        else:
+            print('Unknown method', method) ; return None
 
-    # recursively visit the binary partition tree, storing the encoding
-    cdef int visit_tree(self, unsigned int i):
-        assert i < self.TC
-        # print('visit_tree', i)
-        cdef size_t j
-        if i < self.U: # unitary cluster (single pixel)
-            self.pixels[self.pixel_counter] = i
-            self.leaf_idx[i] = self.pixel_counter
-            self.pixel_counter += 1
-        else: # multi-pixel cluster
-            j = i - self.U
-            self.cl_start[j] = self.pixel_counter
-            self.cl_left[j]  = self.visit_tree(self.branches[j][0])
-            self.cl_right[j] = self.visit_tree(self.branches[j][1])
-            self.cl_end[j]   = self.pixel_counter
-        return i
+        if self.verbose:
+            pbar = pbar if pbar is not None else tqdm(total=max_evals, disable=False, leave=False)
+
+        q = PriorityQueue()
+        q.put(init_coalition)
+        eval_count, reached_terminals = 0, 0
+        while not q.empty():
+            if eval_count >= max_evals: # no more v(s) budget
+                while not q.empty():
+                    coalition = q.get()
+                    coalition.get_shapley(shap_values)
+                break
+
+            batch_masks = []
+            batch_completers = []
+            batch_owens = []
+            while not q.empty() and len(batch_masks) < batch_size and \
+                  eval_count + len(batch_masks) < max_evals:
+                coalition = q.get()
+                if (coalition.segment.area() <= min_area or
+                    (max_weight is not None and coalition.weight<=max_weight)): 
+                    reached_terminals += 1 # do not split further
+                    coalition.get_shapley(shap_values)
+                else:
+                    (m_SuA, m_SuB, split_completer) = coalition.prepare_split(self)
+                    batch_masks.append(m_SuA)
+                    batch_masks.append(m_SuB)
+                    batch_completers.append(split_completer)
+                    batch_owens.append(coalition)
+
+            if len(batch_masks) > 0:
+                f = self.predict_masked(batch_masks)
+                eval_count += len(batch_masks)
+                if self.verbose: 
+                    pbar.update(len(batch_masks))
+
+                for i in range(len(batch_completers)):
+                    f_SuA, f_SuB = f[i*2], f[i*2 + 1]
+                    splits = batch_completers[i](f_SuA, f_SuB)
+                    for o in splits:
+                        q.put(o)
+                    if verbose_plot:
+                        fig,axes = plt.subplots(1, 5, figsize=(5,1))
+                        batch_owens[i].plot(axes[0], self, alpha=0.5)
+                        for i, s in enumerate(splits):
+                            s.plot(axes[i+1], self)
+                        plt.show()
+        if self.verbose:
+            pbar.refresh()
+            if reached_terminals>0: 
+                print(f'Reached {reached_terminals} terminals.')
+        return shap_values
+
+    def init_axisaligned(self):
+        base = BaseSegment()
+        s0 = AxisAlignedSegment(0, self.image_to_explain.shape[0],
+                                0, self.image_to_explain.shape[1], base)
+        return Coalition(self, s0, self.base_f_S, self.base_f_0, 1.0)
+
+    def init_bpt(self, bpt):
+        base = BaseSegment()
+        s0 = BPT_Segment(bpt, bpt.N-1, base)
+        return Coalition(self, s0, self.base_f_S, self.base_f_0, 1.0)
 
 
 ######################################################################################################
 
+def plot_owen_values(explainer, shap_values, class_names, names=None):
+    """
+    Visualize ShapBPT explanations.
 
+    Parameters
+    ----------
+    explainer : Explainer
+        Fitted explanation object.
 
+    shap_values : np.ndarray
+        Explanation maps.
 
+    class_names : list[str]
+        Names of model output classes.
+
+    names : list[str], optional
+        Row labels for multiple explanation sets.
+
+    Returns
+    -------
+    None
+        Displays a matplotlib figure.
+    """
+    shap_values = np.array(shap_values)
+    if len(shap_values.shape)==3: shap_values = np.array([shap_values])
+    max_val = np.nanpercentile(np.abs(shap_values.flatten()), 99.9)
+    num_explained_classes = len(explainer.base_f_S)
+    num_rows = len(shap_values)
+    fig,axes = plt.subplots(num_rows+1, num_explained_classes+1, 
+                            figsize=(2*(num_explained_classes+1), 2*(num_rows+0.3)), 
+                            squeeze=False,
+                            height_ratios=[1]*num_rows + [0.3])
+    base_image = explainer.image_to_explain
+    if np.max(base_image)>1: base_image = base_image.astype(np.uint8)
+    if len(base_image.shape)==2:
+        base_image = np.stack([base_image, base_image, base_image], axis=-1)
+    img_grey = (0.2989 * base_image[:, :, 0] +
+                0.5870 * base_image[:, :, 1] + 
+                0.1140 * base_image[:, :, 2])
+    # axes[0].set_title(f'real: {class_names[expected_class]}')
+    for r in range(num_rows):
+        axes[r,0].imshow(base_image)
+        for i in range(num_explained_classes):
+            axes[r,i+1].imshow(img_grey.astype(base_image.dtype), alpha=0.50, cmap='gray')
+            im=axes[r,i+1].imshow(shap_values[r,i], cmap=shapley_values_colormap, vmin = -max_val, vmax = max_val, alpha=0.80)
+            if r==0: axes[r,i+1].set_title(f'{class_names[explainer.output_indexes[i]]}', fontsize=10)#+
+                                #f'\n{explainer.base_f_S[i]:.5} to {explainer.base_f_0[i]:.5}')
+        for jjj in range(num_explained_classes+1): axes[r,jjj].set_xticks([]) ; axes[r,jjj].set_yticks([])
+    if names is not None:
+        for r in range(num_rows):
+            axes[r,0].set_ylabel(names[r])
+    # Use the last row for the colorbar
+    for ax in axes[-1,:]:
+        ax.set_axis_off()
+        # ax.set_box_aspect(0.1)
+    cb = fig.colorbar(im, ax=axes[-1,:], label="Shapley/Owen value", 
+                      orientation="horizontal", aspect=80, fraction=0.9)#, location='bottom') #,  fraction=0.5, 
+    cb.outline.set_visible(False)
+    fig.subplots_adjust(hspace=0.1, wspace=0.1)
+    # plt.tight_layout()
+    plt.show()
+
+######################################################################################################
