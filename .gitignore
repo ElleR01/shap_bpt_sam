@@ -48,3 +48,10 @@ docs/_build/
 
 # Ruff
 .ruff_cache/
+
+
+## Model checkpoints for yolo
+examples/notebooks/checkpoints/*
+examples/notebooks/checkpoints/yolo11s.pt
+
+examples/notebooks/results/
