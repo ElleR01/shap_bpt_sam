@@ -54,4 +54,5 @@ docs/_build/
 examples/notebooks/checkpoints/*
 examples/notebooks/checkpoints/yolo11s.pt
 
+## Results
 examples/notebooks/results/

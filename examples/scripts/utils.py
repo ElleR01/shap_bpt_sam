@@ -1,6 +1,8 @@
 ## UTIL Functions for MS COCO Dataset
 from pathlib import Path
 import html
+import json
+import os
 import re
 
 import cv2
@@ -136,20 +138,289 @@ def build_experiment_table(experiment_map):
         return experiment_table
 
 
-def build_html_report(results_dir, output_html, experiment_map, experiment_table, image_id):
+def save_detection_summary_json(output_json, image_id, fixed_category, has_segmentation,
+                                speed=None, top_k_classes=None, explained_class=None,
+                                extra=None):
+        """Save per-image detection metadata used by the HTML report."""
+        output_json = Path(output_json)
+        output_json.parent.mkdir(parents=True, exist_ok=True)
+
+        def as_builtin(value):
+                if isinstance(value, np.generic):
+                        return value.item()
+                if isinstance(value, np.ndarray):
+                        return value.tolist()
+                if isinstance(value, dict):
+                        return {str(k): as_builtin(v) for k, v in value.items()}
+                if isinstance(value, (list, tuple)):
+                        return [as_builtin(v) for v in value]
+                return value
+
+        summary = {
+                "image_id": str(image_id),
+                "fixed_category": str(fixed_category),
+                "explained_class": str(explained_class if explained_class is not None else fixed_category),
+                "has_segmentation": bool(has_segmentation),
+                "speed": as_builtin(speed or {}),
+                "top_k_classes": as_builtin(top_k_classes or []),
+        }
+        if extra:
+                summary.update(as_builtin(extra))
+
+        output_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        print(f"Detection summary saved to: {output_json}")
+        return output_json, summary
+
+
+def _find_detection_summary_json(results_dir, output_html, image_id, metadata_json=None):
+        candidates = []
+        if metadata_json is not None:
+                candidates.append(Path(metadata_json))
+
+        candidates.extend([
+                Path(results_dir) / f"{image_id}_results.json",
+                Path(results_dir) / f"{image_id}_detection_summary.json",
+                Path(results_dir) / "detection_summary.json",
+                Path(results_dir) / "results.json",
+                Path(output_html).parent / f"{image_id}_results.json",
+                Path(output_html).parent / f"{image_id}_detection_summary.json",
+        ])
+
+        for candidate in candidates:
+                if candidate.exists():
+                        return candidate
+        return None
+
+
+def _format_top_k_classes(top_k_classes):
+        rows = []
+        for item in top_k_classes or []:
+                if isinstance(item, dict):
+                        class_id = item.get("class_id", item.get("id", ""))
+                        class_name = item.get("class_name", item.get("name", ""))
+                        confidence = item.get("confidence", item.get("score", ""))
+                else:
+                        values = list(item)
+                        class_id = values[0] if len(values) > 0 else ""
+                        class_name = values[1] if len(values) > 1 else ""
+                        confidence = values[2] if len(values) > 2 else ""
+
+                if isinstance(confidence, (int, float, np.floating)):
+                        confidence = f"{float(confidence):.4f}"
+
+                rows.append(
+                        f"<tr><td>{html.escape(str(class_id))}</td>"
+                        f"<td>{html.escape(str(class_name))}</td>"
+                        f"<td>{html.escape(str(confidence))}</td></tr>"
+                )
+        return "\n".join(rows)
+
+
+def _path_to_img_src(path):
+        if not path:
+                return ""
+        path = Path(path)
+        if path.exists():
+                return path.resolve().as_uri()
+        return str(path)
+
+
+def _count_mask_labels(path):
+        if not path:
+                return None
+        path = Path(path)
+        if not path.exists():
+                return None
+
+        try:
+                if path.suffix.lower() == ".npy":
+                        mask = np.load(path)
+                else:
+                        mask = plt.imread(path)
+                        if mask.ndim == 3:
+                                mask = mask.reshape(-1, mask.shape[-1])
+                                return int(np.unique(mask, axis=0).shape[0])
+                return int(np.unique(mask).size)
+        except Exception:
+                return None
+
+
+def _infer_sam_mask_path(summary):
+        if summary.get("sam_mask_path"):
+                return summary["sam_mask_path"]
+
+        image_id = summary.get("image_id_padded") or summary.get("image_id")
+        if not image_id:
+                return ""
+
+        image_id = str(image_id).zfill(12)
+        project_root = Path(__file__).resolve().parents[2]
+        sam_path = project_root / "examples" / "partitions" / f"{image_id}_sam.png"
+        return str(sam_path) if sam_path.exists() else ""
+
+
+def _infer_refined_mask_path(summary):
+        if summary.get("refined_mask_path"):
+                return summary["refined_mask_path"]
+
+        image_id = summary.get("image_id_padded") or summary.get("image_id")
+        if not image_id:
+                return ""
+
+        image_id = str(image_id).zfill(12)
+        project_root = Path(__file__).resolve().parents[2]
+        refined_path = project_root / "examples" / "partitions" / f"{image_id}_refined.npy"
+        return str(refined_path) if refined_path.exists() else ""
+
+
+def _infer_auc_curve_path(summary, results_dir):
+        if summary.get("auc_curve_path"):
+                return summary["auc_curve_path"]
+
+        image_id = summary.get("image_id")
+        if not image_id:
+                return ""
+
+        auc_path = Path(results_dir) / f"auc_results_{image_id}.png"
+        return str(auc_path) if auc_path.exists() else ""
+
+
+def _mask_npy_to_png_src(mask_path, output_html, image_id):
+        if not mask_path:
+                return ""
+
+        mask_path = Path(mask_path)
+        if not mask_path.exists():
+                return ""
+
+        output_html = Path(output_html)
+        preview_dir = output_html.parent / str(image_id)
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        preview_path = preview_dir / f"{str(image_id).zfill(12)}_refined.png"
+
+        if not preview_path.exists() or preview_path.stat().st_mtime < mask_path.stat().st_mtime:
+                mask = np.load(mask_path)
+                plt.imsave(preview_path, mask, cmap="tab20")
+
+        return Path(os.path.relpath(preview_path.resolve(), start=output_html.parent.resolve())).as_posix()
+
+
+def _build_detection_summary_html(summary, output_html=None, results_dir=None):
+        if not summary:
+                return "", "", ""
+
+        top_k_rows = _format_top_k_classes(summary.get("top_k_classes"))
+        top_k_table = ""
+        if top_k_rows:
+                top_k_table = f"""
+                <table class="mini-table">
+                    <thead><tr><th>Class ID</th><th>Class</th><th>Confidence</th></tr></thead>
+                    <tbody>{top_k_rows}</tbody>
+                </table>
+                """
+
+        detection_summary_html = f"""
+        <div class="panel">
+            <h2>Detection Summary</h2>
+            <div class="summary-grid">
+                <div><span class="summary-label">Image ID</span><strong>{html.escape(str(summary.get("image_id", "")))}</strong></div>
+                <div><span class="summary-label">Explained class</span><strong>{html.escape(str(summary.get("explained_class", "")))}</strong></div>
+                <div><span class="summary-label">Fixed category</span><strong>{html.escape(str(summary.get("fixed_category", "")))}</strong></div>
+                <div><span class="summary-label">Has segmentation</span><strong>{html.escape(str(summary.get("has_segmentation", "")))}</strong></div>
+            </div>
+            {top_k_table}
+        </div>
+        """
+
+        input_image_src = _path_to_img_src(summary.get("input_image_path"))
+        sam_mask_path = _infer_sam_mask_path(summary)
+        refined_mask_path = _infer_refined_mask_path(summary)
+        sam_mask_src = _path_to_img_src(sam_mask_path)
+        refined_mask_src = _mask_npy_to_png_src(
+                refined_mask_path,
+                output_html,
+                summary.get("image_id", ""),
+        ) if output_html is not None else ""
+        sam_mask_count = _count_mask_labels(sam_mask_path)
+        refined_mask_count = _count_mask_labels(refined_mask_path)
+        sam_caption = f"SAM masks ({sam_mask_count})" if sam_mask_count is not None else "SAM masks"
+        refined_caption = f"Refined mask ({refined_mask_count})" if refined_mask_count is not None else "Refined mask"
+        input_images_html = ""
+        if input_image_src or sam_mask_src or refined_mask_src:
+                input_image_html = (
+                        f'<figure><img src="{html.escape(input_image_src)}" alt="Input image">'
+                        f'<figcaption>Input image</figcaption></figure>'
+                        if input_image_src else ""
+                )
+                sam_mask_html = (
+                        f'<figure><img src="{html.escape(sam_mask_src)}" alt="SAM masks">'
+                        f'<figcaption>{html.escape(sam_caption)}</figcaption></figure>'
+                        if sam_mask_src else ""
+                )
+                refined_mask_html = (
+                        f'<figure><img src="{html.escape(refined_mask_src)}" alt="Refined mask">'
+                        f'<figcaption>{html.escape(refined_caption)}</figcaption></figure>'
+                        if refined_mask_src else ""
+                )
+                input_images_html = f"""
+                <div class="panel">
+                    <h2>Input, SAM Masks, And Refined Mask</h2>
+                    <div class="summary-images">
+                        {input_image_html}
+                        {sam_mask_html}
+                        {refined_mask_html}
+                    </div>
+                </div>
+                """
+
+        auc_curve_src = _path_to_img_src(_infer_auc_curve_path(summary, results_dir)) if results_dir is not None else ""
+        auc_curve_html = ""
+        if auc_curve_src:
+                auc_curve_html = f"""
+                <div class="panel">
+                    <h2>AUC Curves</h2>
+                    <figure class="auc-figure">
+                        <img src="{html.escape(auc_curve_src)}" alt="AUC curves">
+                    </figure>
+                </div>
+                """
+
+        return detection_summary_html, input_images_html, auc_curve_html
+
+
+def build_html_report(results_dir, output_html, experiment_map, experiment_table, image_id, metadata_json=None):
         """Create a standalone HTML report with filter buttons, sortable table, and figure cards."""
         results_dir = Path(results_dir)
         output_html = Path(output_html)
+        image_id = str(image_id)
+        output_html.parent.mkdir(parents=True, exist_ok=True)
+
+        summary_path = _find_detection_summary_json(results_dir, output_html, image_id, metadata_json=metadata_json)
+        detection_summary = None
+        if summary_path is not None:
+                detection_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        detection_summary_html, input_images_html, auc_curve_html = _build_detection_summary_html(
+                detection_summary,
+                output_html=output_html,
+                results_dir=results_dir,
+        )
 
         rows = []
         pattern = re.compile(r"^(E[1-8])_(SAM|noSAM)_(.+)\.png$")
 
-        for png_path in sorted(results_dir.glob("E*_*.png")):
+        png_paths = sorted(results_dir.glob("E*_*.png"))
+        if not png_paths:
+                png_paths = sorted(results_dir.glob("*/E*_*.png"))
+
+        for png_path in png_paths:
                 match = pattern.match(png_path.name)
                 if not match:
                         continue
                 exp_code, sam_flag, _ = match.groups()
                 cfg = experiment_map[exp_code]
+                figure_path = Path(
+                        os.path.relpath(png_path.resolve(), start=output_html.parent.resolve())
+                ).as_posix()
                 rows.append({
                         "Exp": exp_code,
                         "SAM": sam_flag,
@@ -158,7 +429,7 @@ def build_html_report(results_dir, output_html, experiment_map, experiment_table
                         "use_color_term": cfg["use_color_term"],
                         "description": experiment_table.loc[experiment_table["Exp"] == exp_code, "description"].iloc[0],
                         "figure": png_path.name,
-                        "figure_path": png_path.name,
+                        "figure_path": figure_path,
                 })
 
         df = pd.DataFrame(rows)
@@ -220,6 +491,22 @@ def build_html_report(results_dir, output_html, experiment_map, experiment_table
         .card {{ margin: 0; background: #111827; border: 1px solid #1f2937; border-radius: 16px; overflow: hidden; }}
         .card img {{ width: 100%; display: block; background: white; }}
         .card figcaption {{ padding: 12px; font-size: 14px; color: #cbd5e1; }}
+        .summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }}
+        .summary-grid > div {{ background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 10px 12px; }}
+        .summary-wide {{ grid-column: 1 / -1; }}
+        .summary-label {{ display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }}
+        .summary-images {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin: 12px 0 16px; }}
+        .summary-images figure {{ margin: 0; background: #0f172a; border: 1px solid #334155; border-radius: 12px; overflow: hidden; }}
+        .summary-images img {{ width: 100%; max-height: 360px; object-fit: contain; display: block; background: white; }}
+        .summary-images figcaption {{ padding: 10px 12px; color: #cbd5e1; font-size: 14px; }}
+        .auc-figure {{ margin: 0; background: #0f172a; border: 1px solid #334155; border-radius: 12px; overflow: hidden; }}
+        .auc-figure img {{ width: 100%; display: block; background: white; }}
+        .mini-table {{ margin-top: 14px; }}
+        .collapsible-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }}
+        .collapsible-head h2 {{ margin: 0; }}
+        .collapse-toggle {{ border: 1px solid #334155; background: #0f172a; color: var(--text); padding: 7px 11px; border-radius: 8px; cursor: pointer; }}
+        .collapse-toggle:hover {{ border-color: var(--accent); }}
+        .collapsible-body.collapsed {{ display: none; }}
         .hidden {{ display: none !important; }}
         .subtle {{ color: var(--muted); }}
         a {{ color: #7dd3fc; text-decoration: none; }}
@@ -231,32 +518,42 @@ def build_html_report(results_dir, output_html, experiment_map, experiment_table
         <h1>ShapBPT report for {html.escape(image_id)}</h1>
         <div class="subtle">Filter by SAM / noSAM, click the table headers to sort, or use the search box.</div>
 
-        <div class="panel">
-            <div class="toolbar">
-                <button class="btn active" data-filter="all">All</button>
-                <button class="btn" data-filter="SAM">SAM only</button>
-                <button class="btn" data-filter="noSAM">noSAM only</button>
-                {''.join(f'<button class="btn" data-filter="{exp}">{exp}</button>' for exp in sorted(df["Exp"].unique()))}
-                <input id="searchBox" class="search" type="search" placeholder="Search exp / terms / filename...">
-            </div>
+        {detection_summary_html}
 
-            <table id="expTable">
-                <thead>
-                    <tr>
-                        <th data-sort="string">Exp</th>
-                        <th data-sort="string">SAM</th>
-                        <th data-sort="string">Area</th>
-                        <th data-sort="string">Perimeter</th>
-                        <th data-sort="string">Color</th>
-                        <th data-sort="string">Description</th>
-                        <th data-sort="string">Figure</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {table_rows}
-                </tbody>
-            </table>
+        <div class="panel">
+            <div class="collapsible-head">
+                <h2>Experiment Table</h2>
+                <button id="toggleExpTable" class="collapse-toggle" type="button" aria-expanded="false" aria-controls="expTablePanel">Show table</button>
+            </div>
+            <div id="expTablePanel" class="collapsible-body collapsed">
+                <div class="toolbar">
+                    <button class="btn active" data-filter="all">All</button>
+                    <button class="btn" data-filter="SAM">SAM only</button>
+                    <button class="btn" data-filter="noSAM">noSAM only</button>
+                    {''.join(f'<button class="btn" data-filter="{exp}">{exp}</button>' for exp in sorted(df["Exp"].unique()))}
+                    <input id="searchBox" class="search" type="search" placeholder="Search exp / terms / filename...">
+                </div>
+
+                <table id="expTable">
+                    <thead>
+                        <tr>
+                            <th data-sort="string">Exp</th>
+                            <th data-sort="string">SAM</th>
+                            <th data-sort="string">Area</th>
+                            <th data-sort="string">Perimeter</th>
+                            <th data-sort="string">Color</th>
+                            <th data-sort="string">Description</th>
+                            <th data-sort="string">Figure</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {table_rows}
+                    </tbody>
+                </table>
+            </div>
         </div>
+
+        {input_images_html}
 
         <div class="panel">
             <h2>Figures</h2>
@@ -264,6 +561,8 @@ def build_html_report(results_dir, output_html, experiment_map, experiment_table
                 {''.join(card_html)}
             </div>
         </div>
+
+        {auc_curve_html}
     </div>
 
     <script>
@@ -271,7 +570,15 @@ def build_html_report(results_dir, output_html, experiment_map, experiment_table
         const searchBox = document.getElementById('searchBox');
         const rows = Array.from(document.querySelectorAll('#expTable tbody tr'));
         const cards = Array.from(document.querySelectorAll('#figureGrid .card'));
+        const expTablePanel = document.getElementById('expTablePanel');
+        const toggleExpTable = document.getElementById('toggleExpTable');
         let activeFilter = 'all';
+
+        toggleExpTable.addEventListener('click', () => {{
+            const isCollapsed = expTablePanel.classList.toggle('collapsed');
+            toggleExpTable.setAttribute('aria-expanded', String(!isCollapsed));
+            toggleExpTable.innerText = isCollapsed ? 'Show table' : 'Hide table';
+        }});
 
         function applyFilters() {{
             const q = (searchBox.value || '').toLowerCase().trim();
@@ -322,6 +629,107 @@ def build_html_report(results_dir, output_html, experiment_map, experiment_table
         output_html.write_text(html_text, encoding='utf-8')
         print(f"HTML report saved to: {output_html}")
         return output_html, df
+
+
+def build_all_images_html_report(results_root, output_html=None, title="ShapBPT All Images Report"):
+        """Create one dashboard HTML with a dropdown for all per-image reports."""
+        results_root = Path(results_root)
+        output_html = Path(output_html) if output_html is not None else results_root / "shapbpt_all_images_report.html"
+        output_html.parent.mkdir(parents=True, exist_ok=True)
+
+        entries = []
+        for json_path in sorted(results_root.glob("*/*_results.json")):
+                try:
+                        summary = json.loads(json_path.read_text(encoding="utf-8"))
+                except Exception:
+                        continue
+
+                image_id = str(summary.get("image_id") or json_path.parent.name)
+                explained_class = str(summary.get("explained_class") or summary.get("fixed_category") or "unknown")
+                report_path = results_root / f"shapbpt_report_{image_id}.html"
+                if not report_path.exists():
+                        continue
+
+                top = summary.get("top_k_classes") or []
+                top_conf = ""
+                if top:
+                        first = top[0]
+                        if isinstance(first, dict):
+                                conf = first.get("confidence", "")
+                                if isinstance(conf, (int, float, np.floating)):
+                                        top_conf = f" · {float(conf):.3f}"
+
+                entries.append({
+                        "image_id": image_id,
+                        "explained_class": explained_class,
+                        "label": f"{image_id} - {explained_class}{top_conf}",
+                        "report_path": Path(os.path.relpath(report_path.resolve(), start=output_html.parent.resolve())).as_posix(),
+                        "has_segmentation": str(summary.get("has_segmentation", "")),
+                })
+
+        if not entries:
+                print(f"No per-image reports found in {results_root}")
+                return None
+
+        options = "\n".join(
+                f'<option value="{html.escape(entry["report_path"])}" '
+                f'data-image="{html.escape(entry["image_id"])}" '
+                f'data-class="{html.escape(entry["explained_class"])}" '
+                f'data-seg="{html.escape(entry["has_segmentation"])}">'
+                f'{html.escape(entry["label"])}</option>'
+                for entry in entries
+        )
+
+        first = entries[0]
+        html_text = f'''<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{html.escape(title)}</title>
+    <style>
+        :root {{ --panel: #111827; --muted: #94a3b8; --text: #e5e7eb; --accent: #38bdf8; }}
+        body {{ margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #0b1220; color: var(--text); }}
+        .topbar {{ position: sticky; top: 0; z-index: 10; background: rgba(11, 18, 32, 0.96); border-bottom: 1px solid #1f2937; padding: 16px 24px; }}
+        .wrap {{ max-width: 1400px; margin: 0 auto; }}
+        h1 {{ margin: 0 0 12px; font-size: 22px; }}
+        .controls {{ display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }}
+        select {{ min-width: min(560px, 100%); padding: 9px 12px; border-radius: 10px; border: 1px solid #334155; background: #0f172a; color: var(--text); }}
+        .meta {{ color: var(--muted); font-size: 14px; }}
+        iframe {{ width: 100%; height: calc(100vh - 118px); border: 0; display: block; background: white; }}
+    </style>
+</head>
+<body>
+    <div class="topbar">
+        <div class="wrap">
+            <h1>{html.escape(title)}</h1>
+            <div class="controls">
+                <select id="imageSelect">{options}</select>
+                <span id="meta" class="meta"></span>
+            </div>
+        </div>
+    </div>
+    <iframe id="reportFrame" src="{html.escape(first["report_path"])}" title="Selected ShapBPT report"></iframe>
+    <script>
+        const select = document.getElementById('imageSelect');
+        const frame = document.getElementById('reportFrame');
+        const meta = document.getElementById('meta');
+
+        function updateReport() {{
+            const option = select.options[select.selectedIndex];
+            frame.src = option.value;
+            meta.textContent = `Image ${{option.dataset.image}} · explained class: ${{option.dataset.class}} · segmentation: ${{option.dataset.seg}}`;
+        }}
+
+        select.addEventListener('change', updateReport);
+        updateReport();
+    </script>
+</body>
+</html>'''
+
+        output_html.write_text(html_text, encoding="utf-8")
+        print(f"All-images HTML report saved to: {output_html}")
+        return output_html, pd.DataFrame(entries)
 
 
 
