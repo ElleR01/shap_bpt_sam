@@ -499,7 +499,7 @@ cdef class BinaryPartitionTreeBuilder:
         cdef double area_score, color_score, perim_score
 
         #TODO: IoU
-        cdef double partition_iou
+        cdef double partition_score
         cdef uint64_t mask0 
         cdef uint64_t mask1 
         cdef int inter_count
@@ -511,9 +511,12 @@ cdef class BinaryPartitionTreeBuilder:
 
             inter_count = popcount64(mask0 & mask1) + 1
             union_count = popcount64(mask0 | mask1) + 1
-            partition_iou = <double>inter_count / <double>union_count
+            # partition_score = 1.0 - <double>inter_count / <double>union_count
+            # USE union only as partition_score instead of IoU
+            partition_score = <double>union_count
+            partition_score = partition_score**2
         else:
-            partition_iou = 1.0
+            partition_score = 1.0
 
         area_score = self.clst[cl0].area + self.clst[cl1].area
 
@@ -547,7 +550,9 @@ cdef class BinaryPartitionTreeBuilder:
         
         #TODO:IoU
         if self.prebuilt_partitions is not None:
-            score *= (1.0 - partition_iou)
+            score *= partition_score
+
+        assert score > 0.0, f'color_score={color_score}, area_score={area_score}, perim_score={perim_score}, partition_score={partition_score}'
 
         return score
 
