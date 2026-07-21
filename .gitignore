@@ -56,3 +56,10 @@ examples/notebooks/checkpoints/yolo11s.pt
 
 ## Results
 examples/notebooks/results/
+
+## Partitions
+examples/partitions_100/
+examples/partitions_24/
+
+## 
+examples/notebooks/paper_figures/
