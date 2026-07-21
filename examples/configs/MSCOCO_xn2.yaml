@@ -18,10 +18,12 @@ data:
   #   custom
 
   dataset_root: "D:\\DS\\MS_COCO"
+  image_dir: "D:\\DS\\MS_COCO\\val2017"
+  annotation_file: "D:\\DS\\MS_COCO\\annotations\\annotations_trainval2017\\annotations\\instances_val2017.json"
   # Example:
   #   "/home/user/data/raw/mvtec_anomaly_detection"
 
-  category: PLeft
+
   # For MVTec examples:
   #   bottle, cable, capsule, carpet, grid, hazelnut, leather,
   #   metal_nut, pill, screw, tile, toothbrush, transistor, wood, zipper
