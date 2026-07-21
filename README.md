@@ -256,7 +256,8 @@ python setup.py build_ext --inplace
 
 ### Windows systems
 On Windows, the package can be compiled using `ming32`, with the command:
-```
+
+```bash
 python setup.py build_ext --inplace --compiler=mingw32
 ```
 
@@ -270,15 +271,22 @@ Alternativly, Follow the instruction on [`this page`](https://github.com/nuncjo/
 
 ### Package installation (all systems)
 After compiling, the ShapBPT python module can be installed using:
-```
+
+```bash
 python setup.py install
 ```
 
 To clean up the folder from the intermediate build files, use:
-```
+
+```bash
 python setup.py clean --all
 ```
 
+## Verify installation:
+
+```sh
+python -c "import shap_bpt; print(shap_bpt.__version__); print(shap_bpt.__release_name__)"
+```
 # Examples
 
 - [ImageNet setup with BPT partitions](examples/ImageNET_BPT.ipynb)
