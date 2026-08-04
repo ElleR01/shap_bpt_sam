@@ -111,7 +111,7 @@ def black_rainbow_colormap(
 
     return cmap, norm
 
-def plot_masks(masks, title=None, use_new_colormap=True, show_ratios=True, mask_types=['Sorted', 'Refined']):
+def plot_masks(masks,mask_types,version='mask', title=None, use_new_colormap=True, show_ratios=True, verbose=False):
     fig, axes = plt.subplots(1, len(masks), figsize=(5 * len(masks), 3.5))
     if use_new_colormap:
         # max_label = max(np.max(mask) for mask in masks)
@@ -121,12 +121,13 @@ def plot_masks(masks, title=None, use_new_colormap=True, show_ratios=True, mask_
         cmap = "tab20"
         norm = None
     for i, (mask_type, masks_) in enumerate(zip(mask_types, masks)):
-        
-        print(f'Verifying Partition: {mask_type}')
-        verify_partitions(masks_, verbose_level=1)
+        if verbose:
+            print(f'Verifying Partition: {mask_type}')
+            verify_partitions(masks_, verbose_level=1)
         if show_ratios:
             bg_ratio = background_ratio(masks_, bg_label=0)
-            print(f"Background Ratio for {mask_type}: {bg_ratio['bg_percent']:.2f}%")
+            if verbose:
+                print(f"Background Ratio for {mask_type}: {bg_ratio['bg_percent']:.2f}%")
 
         image = axes[i].imshow(masks_, cmap=cmap, norm=norm,aspect="auto")
         # image = ax.imshow(masks_sorted, cmap=cmap, norm=norm, aspect="auto")
@@ -135,7 +136,7 @@ def plot_masks(masks, title=None, use_new_colormap=True, show_ratios=True, mask_
         colorbar.set_label("Index")
         axes[i].set_title(f'{mask_type} : {len(np.unique(masks_))} - BG: {bg_ratio["bg_percent"]:.2f}%', fontsize=14);
         axes[i].set_xticks([]); axes[i].set_yticks([]);
-        print('-'*100)
+        if verbose: print('-'*100)
     # plt.tight_layout()
     plt.subplots_adjust(wspace=0.05, hspace=0.05)
     plt.show()
@@ -440,3 +441,8 @@ def summarize_mask_ratios(mask, mask_name='mask', bg_label=0, top_n=10):
     )
     display(ratios.head(top_n))
     return ratios, bg
+
+
+#================= 
+# CREATE HTML REPORT
+
