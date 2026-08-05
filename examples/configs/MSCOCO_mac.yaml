@@ -14,87 +14,14 @@ verbose: True
 data:
   name: MS_COCO
   # Options:
-  #   MVTec
-  #   Cobots_Synthetic
-  #   Robotics_Hazards
-  #   custom
-
+  #   MS_COCO : Microsoft COCO dataset
   dataset_root: "/Users/rashid/data/DS/MS_COCO"
   image_dir: "/Users/rashid/data/DS/MS_COCO/val2017"
   annotation_file: "/Users/rashid/data/DS/MS_COCO/annotations/annotations_trainval2017/annotations/instances_val2017.json"
-  # Example:
-  #   "/home/user/data/raw/mvtec_anomaly_detection"
 
-  img_size: 128
-  batch_size: 16
-  num_workers: 0
-  pin_memory: false
-
-model:
-  name: vaegan
-  # Options:
-  #   vaegan
-
-  checkpoint_root: "checkpoints"
-
-features:
-  extractors: [swin, autoencoder]
-  # Options:
-  #   swin
-  #   autoencoder
-
-  autoencoder:
-    arch: vgg16
-    img_size: 224
-    # Official ImageNet VGG16 model-zoo link from Horizon2333:
-    # https://drive.google.com/file/d/1WwJiQ1kBcNCZ37F6PJ_0bIL0ZeU3_sV8/view?usp=sharing
-    # Download it locally and put the .pth path here.
-    checkpoint: checkpoints/imagenet-autoencoder/imagenet_vgg16.pth
-    batch_norm: true
-
-  plots:
-    enabled: true
-    methods: [pca]
-    # Options:
-    #   pca
-    #   tsne
-    dimensions: [2, 3]
-    max_points: 2000
-
-scoring:
-  method: embedding_knn
-  n_clusters: 32
-  n_neighbors: 5
-  metric: euclidean
-  aggregation: mean
-  # Options:
-  #   embedding_kmeans
-  #   embedding_knn
-
-  quantiles: [0.5, 0.75, 0.9, 0.95, 0.99]
-  # Used when the scoring method produces multiple score levels.
-
-threshold:
-  method: single_point
-  # Options:
-  #   single_point
-  #   multi_point
-
-  percentile: 99
-  # Threshold is computed from normal training scores.
-  # Common values:
-  #   90, 95, 97.5, 99
-
-  decision_rule: any
-  # Used only with multi_point thresholding.
-  # Options:
-  #   any      : anomaly if at least one score exceeds the threshold
-  #   all      : anomaly if all scores exceed the threshold
-  #   majority : anomaly if more than half of scores exceed the threshold
-
+  masks_path: "/Users/rashid/data/PhD/datacloud_data/repos/XAI/ShapBPT-SAM/shap_bpt_sam/examples/data"
+  mask_dir: "risultati_120"
+  mask_dir_final: "120_refined_filled"
 output:
-  dir: results/cobots/
-  save_scores: true
-  save_predictions: true
-  save_metrics: true
-  save_config: true
+  folder: "results"
+  dir: /Users/rashid/data/PhD/datacloud_data/repos/XAI/ShapBPT-SAM/shap_bpt_sam/examples/notebooks

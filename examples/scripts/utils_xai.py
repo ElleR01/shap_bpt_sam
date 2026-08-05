@@ -4,6 +4,7 @@ import html
 import json
 import os
 import re
+from time import time
 
 import cv2
 import numpy as np
@@ -1262,5 +1263,282 @@ def get_top_k_classes(results,class_names, k=5):
 #     torch.cuda.empty_cache()
 #     return np.array(p)
 
+#==========================================================================================
+
+# importlib.reload(utx)
+import sys
+import os
+from pathlib import Path
+# import yaml
+
+def find_project_root(start=None):
+    start = Path.cwd() if start is None else Path(start).resolve()
+    for path in (start, *start.parents):
+        if (path / 'pyproject.toml').exists() and (path / 'shap_bpt').is_dir():
+            return path
+    raise FileNotFoundError('Could not find the project root from the current working directory.')
+
+original_working_dir = Path.cwd()
+project_root = find_project_root(original_working_dir)
+
+scripts_dir = project_root / "examples/scripts"
+if str(scripts_dir) not in sys.path:
+    sys.path.insert(0, str(scripts_dir))
+
+import utils_xai as utx
+import utils_sam as uts
+import utils_sam_2 as uts2
+
+shapley_values_colormap = utx.get_shapley_values_colormap()
+def plot_xai(input_data,partitions,shap_values, model, results, image_id,
+              destroy_fig=False, save_path=None, save_fig=False):
+    fig, axes = plt.subplots(3, 3, figsize=(15, 10))
+    axes = axes.flatten()
+    axes[0].imshow(input_data['image_to_explain'])
+    axes[0].set_title(f"Original Image - {image_id}")
+    axes[0].axis('off')
+    ## Plot yolo predictions
+    utx.plot_predictions(input_data['image_to_explain'], model, results,
+                         category_name=input_data['fixed_category'],
+                         fig_size=(5, 5),
+                         save_fig=False,
+                         ax=axes[1])
+    axes[1].set_title(f"YOLO Predictions for {input_data['fixed_category']}")
+    mask_type = 'sam'
+    masks = partitions[mask_type]
+
+    N = max(np.max(mask) for mask in masks)
+    cmap, norm = uts.black_rainbow_colormap(N, rainbow_name="turbo")
+    
+    image = axes[2].imshow(masks, cmap=cmap, norm=norm, aspect="auto")
+    colorbar = fig.colorbar(image, ax=axes[2], ticks=np.arange(N + 1))
+    colorbar.set_label("Index")
+    bg_ratio = uts.background_ratio(masks, bg_label=0)
+
+    axes[2].set_title(f'{mask_type} : {len(np.unique(masks))} - BG: {bg_ratio["bg_percent"]:.2f}%', fontsize=14);
+    axes[2].set_xticks([]); axes[2].set_yticks([]);
+    
+    # axes[2].set_title(f"partition")
+    # axes[2].axis('off')
+
+    for i, (method,sv) in enumerate(shap_values.items()):
+        
+        # axes[i + 1].imshow(shap_values[method][0], cmap='hot')
+        sv,mv = utx.scale_shap_values(sv, robust_percentile=99.5, factor=1)
+        max_abs = np.max(np.abs(sv))
+        # print(method, max_abs, mv)
+        im = axes[i + 3].imshow(sv[0], vmin=-mv, vmax=mv, cmap=shapley_values_colormap)
+        fig.colorbar(im, ax=axes[i + 3], fraction=0.03)#, location='bottom') #,  fraction=0.5, 
+        axes[i + 3].set_title(f"{method} Explanation")
+        # axes[i + 1].axis('off')
+        axes[i + 3].set_xticks([]); axes[i + 3].set_yticks([])
+    plt.tight_layout()
+    if save_fig:
+        # save_path = os.path.join(config['output']['dir'], config['output']['folder'], 'xai_results', str(int(input_data['fname'])))
+        # os.makedirs(save_path, exist_ok=True)
+        plt.savefig(os.path.join(save_path, f"{image_id}_xai_results.png"), dpi=100, bbox_inches='tight')
+    if destroy_fig: 
+        plt.close(fig)
+    # plt.subplots_adjust(wspace=0.1, hspace=0.2)
+    plt.show()
+
+#==========================================================================================
 
 
+# Save all detection results for each image to a JSON file used by the HTML report.
+import json
+
+def to_jsonable(value):
+    if hasattr(value, 'item'):
+        return value.item()
+    if hasattr(value, 'tolist'):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {str(k): to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [to_jsonable(v) for v in value]
+    return value
+
+def save_yolo_predictions(results,input_data,config,has_segmentation,top_k_classes, verbose=False):
+    if isinstance(results, dict):
+        yolo_speed = results.get('speed', {})
+    elif isinstance(results, (list, tuple)) and len(results) > 0:
+        yolo_speed = getattr(results[0], 'speed', {})
+    else:
+        yolo_speed = getattr(results, 'speed', {})
+
+    detection_summary = {
+        'image_id': str(input_data['fname']),
+        # 'image_id_padded': str(image_id),
+        # 'input_image': image_no,
+        # 'sam_mask_path': str(os.path.join(masks_base_path, f'{image_id}_sam.png')),
+        'fixed_category': input_data['fixed_category'],
+        'explained_class': input_data['explained_class'],
+        # 'predicted_class_id': int(explained_class_id),
+        'f_S': float(input_data['f_S']),
+        'f_0': float(input_data['f_0']),
+        'has_segmentation': bool(has_segmentation),
+        'speed': to_jsonable(yolo_speed),
+        'top_k_classes': [
+            {'class_id': int(class_id), 'class_name': str(class_name), 'confidence': float(confidence)}
+            for class_id, class_name, confidence in top_k_classes
+        ],
+    }
+
+    # path_results = os.path.join(original_working_dir, 'results')
+    path_results = os.path.join(config['output']['dir'], config['output']['folder'], 'xai_results')
+    path_results_img = os.path.join(path_results, str(int(input_data['fname'])))
+    os.makedirs(path_results_img, exist_ok=True)
+
+    detection_summary_path = os.path.join(path_results_img, f'{int(input_data["fname"])}_predictions.json')
+    with open(detection_summary_path, 'w') as f:
+        json.dump(to_jsonable(detection_summary), f, indent=2)
+
+    if verbose: print(f'Saved detection summary: {detection_summary_path}')
+    return detection_summary
+
+#===========================================================================================
+#  EVALUATION FUNCTIONS
+def _iter_shap_value_items(shap_values):
+    if isinstance(shap_values, dict):
+        yield from shap_values.items()
+        return
+
+    for idx, exp_data in enumerate(shap_values):
+        if isinstance(exp_data, dict):
+            exp_code = exp_data.get('exp_code', exp_data.get('label', f'exp_{idx}'))
+        else:
+            exp_code = f'exp_{idx}'
+        yield exp_code, exp_data
+
+
+def _auc_heatmap(exp_data, auc_class_index=0):
+    if isinstance(exp_data, dict):
+        raw = exp_data.get('shap_values', exp_data.get('values', exp_data.get('heatmap')))
+    else:
+        raw = exp_data
+
+    if raw is None:
+        raise ValueError('Could not find shap values. Expected an array or a dict with shap_values/values/heatmap.')
+
+    heatmap = np.asarray(raw)
+    heatmap = np.squeeze(heatmap)
+
+    if heatmap.ndim == 3:
+        if auc_class_index >= heatmap.shape[0]:
+            raise ValueError(f'auc_class_index={auc_class_index} is outside shap value stack with shape {heatmap.shape}')
+        heatmap = heatmap[auc_class_index]
+
+    if heatmap.ndim != 2:
+        raise ValueError(f'Expected one 2D attribution map after squeezing/indexing, got shape {heatmap.shape}')
+
+    return heatmap.astype(float, copy=False)
+
+import time
+def compute_auc_results(shap_values, nu, f_S, f_0, predicted_cls, batch_size=4,
+                        auc_class_index=0, verbose=False):
+    auc_results = []
+
+    for exp_code, exp_data in _iter_shap_value_items(shap_values):
+        heatmap = _auc_heatmap(exp_data, auc_class_index=auc_class_index)
+        time_start = time.time()
+
+        auc_del = utx.saliency_to_auc(nu, heatmap, f_S, f_0, predicted_cls, batch_size=batch_size, method='del')
+        auc_ins = utx.saliency_to_auc(nu, heatmap, f_S, f_0, predicted_cls, batch_size=batch_size, method='ins')
+        time_eval = time.time() - time_start
+
+        result = {
+            'label': str(exp_code),
+            'auc_del': auc_del,
+            'auc_ins': auc_ins,
+            'time_eval': time_eval,
+        }
+        if isinstance(exp_data, dict):
+            result.update({
+                k: v for k, v in exp_data.items()
+                if k not in {'shap_values', 'values', 'heatmap'}
+            })
+
+        auc_results.append(result)
+        if verbose:
+            print(f"{exp_code}: AUC-DEL={auc_del['auc_clipr']:.4f}, AUC-INS={auc_ins['auc_clipr']:.4f}")
+
+    return auc_results
+
+
+def plot_auc_results(auc_results,path_results_img, figsize=(11, 4), fill_alpha=0.08, save_plot=False,
+                     image_no=None,
+                     destroy_figs=False):
+    fig, axes = plt.subplots(1, 2, figsize=figsize, sharex=True, sharey=True)
+    cmap = plt.get_cmap('tab20')
+
+    best_ins = max(r['auc_ins']['auc_clipr'] for r in auc_results)
+    best_del = min(r['auc_del']['auc_clipr'] for r in auc_results)
+
+    panels = [
+        (axes[0], 'auc_ins', best_ins, True, '$\\mathit{AUC}^{+}$', 'lower right'),
+        (axes[1], 'auc_del', best_del, False, '$\\mathit{AUC}^{-}$', 'upper right'),
+    ]
+
+    for ax, auc_key, best_auc, higher_is_better, title, legend_loc in panels:
+        sorted_results = sorted(
+            auc_results,
+            key=lambda result: result[auc_key]['auc_clipr'],
+            reverse=higher_is_better,
+        )
+
+        for idx, result in enumerate(sorted_results):
+            auc = result[auc_key]
+            score = auc['auc_clipr']
+            is_best = np.isclose(score, best_auc)
+            color = cmap(idx % cmap.N)
+            star = '*' if is_best else ''
+
+            ax.plot(
+                auc['xs'],
+                auc['y_clipr'],
+                color=color,
+                lw=2.4 if is_best else 1.4,
+                alpha=0.95 if is_best else 0.75,
+                label=f"{star}{result['label']} {score:.4f}",
+            )
+            ax.fill_between(auc['xs'], auc['y_clipr'], color=color, alpha=fill_alpha)
+
+        ax.axhline(1.0, ls='--', c='grey', zorder=0)
+        ax.axhline(0.0, c='lightgrey', zorder=0)
+        ax.set_title(title, fontsize=16)
+        ax.set_xlabel('Fraction of Pixels Removed/Inserted')
+        ax.grid(alpha=0.25)
+        ax.legend(borderpad=0.2, labelspacing=0.1, loc=legend_loc, fontsize=8)
+
+    axes[0].set_ylabel('Model Confidence')
+    plt.tight_layout()
+    if save_plot:
+        plt.savefig(os.path.join(path_results_img, f'auc_results_{image_no}.png'), dpi=300, bbox_inches='tight')
+    if destroy_figs:
+        plt.close(fig)
+    plt.show()
+    return fig, axes
+
+def auc_results_to_rows(auc_results, image_no=None, f_S=None, f_0=None,
+                        image_id=None, fixed_category=None):
+    rows = []
+    for result in auc_results:
+        rows.append({
+            'image_no': int(image_no) if image_no is not None else None,
+            'image_id': str(image_id) if image_id is not None else None,
+            'fixed_category': fixed_category,
+            'f_S': float(f_S) if f_S is not None else None,
+            'f_0': float(f_0) if f_0 is not None else None,
+            'method': result.get('label', result.get('exp_code', 'unknown')),
+            'auc_ins': float(result['auc_ins']['auc_clipr']),
+            'auc_del': float(result['auc_del']['auc_clipr']),
+            'time_exp': result['time_exp'],
+            'time_eval': result['time_eval'],
+
+
+        })
+    return rows
+
+
+#===========================================================================================
