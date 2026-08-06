@@ -1,0 +1,44 @@
+# Default configuration file
+# This file is intended as a user-facing manual.
+# Modify the values below according to your dataset, model, and evaluation setup.
+
+device: auto
+# Options:
+#   auto  : use cuda if available, else mps if available, else cpu
+#   cpu   : force CPU
+#   cuda  : force NVIDIA GPU
+#   mps   : force Apple Silicon GPU
+
+verbose: True
+
+data:
+  name: MS_COCO
+  # Options:
+  #   MS_COCO : Microsoft COCO dataset
+  dataset_root: "/beegfs/home/mrashid/datasets/MS_COCO"
+  image_dir: "/beegfs/home/mrashid/datasets/MS_COCO/val2017"
+  annotation_file: "/beegfs/home/mrashid/datasets/MS_COCO/annotations/annotations_trainval2017/annotations/instances_val2017.json"
+
+  masks_path: "/beegfs/home/mrashid/datasets/SAM_BPT"
+  mask_dir: "risultati_120"
+  mask_dir_final: "120_refined_filled"
+
+evaluation:
+  limit: 2
+  bg-type: "noise"
+  max-evals: 1000
+  eval-batch-size: 128
+  auc-batch-size: 64
+  # Options:
+  #   black   : black background
+  #   gray    : gray background
+  #   white   : white background
+  #   blurred : blurred background
+  #  noise  
+
+  # Options:
+  #   batch_size : number of images to process in a single batch during evaluation
+  # --eval-batch-size", type=int, default=16
+output:
+  folder: "results"
+  dir: /beegfs/home/mrashid/repos/XAI/shap_bpt_sam/examples

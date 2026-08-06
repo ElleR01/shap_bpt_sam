@@ -54,9 +54,6 @@ docs/_build/
 examples/notebooks/checkpoints/*
 examples/notebooks/checkpoints/yolo11s.pt
 
-## Results
-examples/notebooks/results/
-
 ## Partitions
 examples/partitions_100/
 examples/partitions_24/
@@ -69,3 +66,8 @@ examples/partitions_new_120
 ## Checkpoints for SAM
 examples/notebooks/checkpoints/
 examples/notebooks/checkpoints/yolo11s.pt
+
+# Results
+examples/notebooks/results/
+/examples/results/xai_results
+results.zip

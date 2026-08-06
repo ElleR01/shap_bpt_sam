@@ -1,0 +1,5 @@
+PyYAML
+Cython
+pycocotools
+ultralytics --no-deps
+# shap
