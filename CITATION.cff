@@ -1,4 +1,4 @@
-cff-version: "1.2.0"
+cff-version: "1.1.0"
 message: "If you use ShapBPT in your research, please cite our AAAI 2026 paper and consider starring this repository."
 
 title: "ShapBPT: Image Feature Attributions using Data-Aware Binary Partition Trees"

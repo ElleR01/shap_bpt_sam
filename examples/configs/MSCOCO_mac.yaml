@@ -22,6 +22,13 @@ data:
   masks_path: "/Users/rashid/data/PhD/datacloud_data/repos/XAI/ShapBPT-SAM/shap_bpt_sam/examples/data"
   mask_dir: "risultati_120"
   mask_dir_final: "120_refined_filled"
+
+model:
+  yolo_model_name: "yolo11s"
+  # Options:
+  #   yolo11s : YOLOv11s
+  #   yolo26s : YOLOv26s
+
 output:
   folder: "results"
   dir: /Users/rashid/data/PhD/datacloud_data/repos/XAI/ShapBPT-SAM/shap_bpt_sam/examples/notebooks
