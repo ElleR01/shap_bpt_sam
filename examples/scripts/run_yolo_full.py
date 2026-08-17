@@ -447,6 +447,15 @@ def build_partition_summary(image_ids, masks_base_path: Path, path_results: Path
     return df
 
 
+def save_current_auc_table(auc_table_rows: list[dict], path_results: Path) -> tuple[Path, pd.DataFrame]:
+    auc_all_df = pd.DataFrame(auc_table_rows)
+    current_run_path = path_results / "auc_results_all_images_current_run.csv"
+    tmp_path = current_run_path.with_name(current_run_path.name + ".tmp")
+    auc_all_df.to_csv(tmp_path, index=False)
+    tmp_path.replace(current_run_path)
+    return current_run_path, auc_all_df
+
+
 def aggregate_auc_outputs(auc_all_df: pd.DataFrame, partition_summary_df: pd.DataFrame, path_results: Path, max_evals: int):
     no_images = len(auc_all_df["image_no"].unique())
     auc_all = auc_all_df.copy()
@@ -1124,16 +1133,19 @@ def run(args):
                         destroy_figs=True,
                     )
                     first_iteration_breakdown["auc_plot"] += time.time() - timing_start
-                auc_table_rows.extend(
-                    utx.auc_results_to_rows(
-                        auc_results,
-                        image_no=image_no,
-                        image_id=image_id,
-                        fixed_category=fixed_category,
-                        f_S=f_S,
-                        f_0=f_0,
-                    )
+                image_auc_rows = utx.auc_results_to_rows(
+                    auc_results,
+                    image_no=image_no,
+                    image_id=image_id,
+                    fixed_category=fixed_category,
+                    f_S=f_S,
+                    f_0=f_0,
                 )
+                auc_table_rows.extend(image_auc_rows)
+                current_run_path, current_auc_df = save_current_auc_table(auc_table_rows, path_results)
+                if resource_logging and (iteration_index == 1 or (args.verbose_k > 0 and iteration_index % args.verbose_k == 0)):
+                    n_saved_images = current_auc_df["image_no"].nunique() if "image_no" in current_auc_df.columns else "unknown"
+                    tqdm.write(f"Current-run AUC saved: {current_run_path} ({n_saved_images} images)")
 
         except Exception as exc:
             failure = {"image_id": image_id, "error": repr(exc), "traceback": traceback.format_exc()}
@@ -1188,9 +1200,7 @@ def run(args):
                 torch.cuda.empty_cache()
 
     if auc_table_rows:
-        auc_all_df = pd.DataFrame(auc_table_rows)
-        current_run_path = path_results / "auc_results_all_images_current_run.csv"
-        auc_all_df.to_csv(current_run_path, index=False)
+        current_run_path, auc_all_df = save_current_auc_table(auc_table_rows, path_results)
         print(f"Current-run AUC table: {current_run_path}")
         aggregate_auc_outputs(auc_all_df, partition_summary_df, path_results, args.max_evals)
         save_time_comparison_outputs(auc_all_df, partition_summary_df, path_results, args.max_evals)
