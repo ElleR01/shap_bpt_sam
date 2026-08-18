@@ -73,3 +73,6 @@ examples/results/
 examples/notebooks/results/
 /examples/results/xai_results
 results.zip
+
+/docs/.DS_Store/
+/docs/source/.DS_Store/
