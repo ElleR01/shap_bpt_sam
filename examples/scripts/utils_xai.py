@@ -1364,7 +1364,7 @@ def to_jsonable(value):
         return [to_jsonable(v) for v in value]
     return value
 
-def save_yolo_predictions(results,input_data,config,has_segmentation,top_k_classes, verbose=False):
+def save_yolo_predictions(results,input_data,config,has_segmentation,top_k_classes, verbose=False, output_json=None):
     if isinstance(results, dict):
         yolo_speed = results.get('speed', {})
     elif isinstance(results, (list, tuple)) and len(results) > 0:
@@ -1390,12 +1390,16 @@ def save_yolo_predictions(results,input_data,config,has_segmentation,top_k_class
         ],
     }
 
-    # path_results = os.path.join(original_working_dir, 'results')
-    path_results = os.path.join(config['output']['dir'], config['output']['folder'], 'xai_results')
-    path_results_img = os.path.join(path_results, str(int(input_data['fname'])))
-    os.makedirs(path_results_img, exist_ok=True)
+    if output_json is None:
+        # path_results = os.path.join(original_working_dir, 'results')
+        path_results = os.path.join(config['output']['dir'], config['output']['folder'], 'xai_results')
+        path_results_img = os.path.join(path_results, str(int(input_data['fname'])))
+        os.makedirs(path_results_img, exist_ok=True)
+        detection_summary_path = os.path.join(path_results_img, f'{int(input_data["fname"])}_predictions.json')
+    else:
+        detection_summary_path = os.fspath(output_json)
+        os.makedirs(os.path.dirname(detection_summary_path), exist_ok=True)
 
-    detection_summary_path = os.path.join(path_results_img, f'{int(input_data["fname"])}_predictions.json')
     with open(detection_summary_path, 'w') as f:
         json.dump(to_jsonable(detection_summary), f, indent=2)
 

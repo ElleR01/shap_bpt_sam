@@ -873,12 +873,24 @@ def build_xai_results_webpage(xai_results_root: Path):
         rows = "".join(f"<tr><td>{escape(k)}</td><td>{fmt_float(v, 3)}</td></tr>" for k, v in speed.items())
         return "<table><thead><tr><th>Stage</th><th>ms</th></tr></thead><tbody>" + rows + "</tbody></table>"
 
+    pred_paths = sorted(xai_results_root.glob("*/*_predictions.json"))
+    if not pred_paths:
+        fallback_root = xai_results_root.parent / "xai_results"
+        image_dirs = sorted({path.parent for path in xai_results_root.glob("*/*_xai_results.png")})
+        for image_dir in image_dirs:
+            fallback_pred = next(iter(sorted((fallback_root / image_dir.name).glob("*_predictions.json"))), None)
+            if fallback_pred is not None:
+                pred_paths.append(fallback_pred)
+
     items = []
-    for pred_path in sorted(xai_results_root.glob("*/*_predictions.json")):
+    for pred_path in pred_paths:
         image_dir = pred_path.parent
         pred = json.loads(pred_path.read_text())
         folder_id = image_dir.name
         image_id = normalize_image_id(pred.get("image_id", folder_id))
+        result_image_dir = xai_results_root / folder_id
+        if result_image_dir.exists():
+            image_dir = result_image_dir
         xai_path = next(iter(sorted(image_dir.glob("*_xai_results.png"))), image_dir / f"{image_id}_xai_results.png")
         auc_path = next(iter(sorted(image_dir.glob("auc_results_*.png"))), image_dir / f"auc_results_{folder_id}.png")
         top_classes = pred.get("top_k_classes", []) or []
@@ -903,7 +915,31 @@ def build_xai_results_webpage(xai_results_root: Path):
             }
         )
     if not items:
-        raise FileNotFoundError(f"No *_predictions.json files found below: {xai_results_root}")
+        image_dirs = sorted({path.parent for path in xai_results_root.glob("*/*_xai_results.png")})
+        for image_dir in image_dirs:
+            folder_id = image_dir.name
+            image_id = normalize_image_id(folder_id)
+            items.append(
+                {
+                    "folder_id": folder_id,
+                    "image_id": image_id,
+                    "pred": {"image_id": image_id, "top_k_classes": []},
+                    "xai_path": next(iter(sorted(image_dir.glob("*_xai_results.png"))), image_dir / f"{image_id}_xai_results.png"),
+                    "auc_path": next(iter(sorted(image_dir.glob("auc_results_*.png"))), image_dir / f"auc_results_{folder_id}.png"),
+                    "summary": {
+                        "image_id": image_id,
+                        "fixed_category": "",
+                        "explained_class": "",
+                        "top_class": "",
+                        "top_confidence": None,
+                        "f_S": None,
+                        "f_0": None,
+                        "has_segmentation": "",
+                    },
+                }
+            )
+    if not items:
+        raise FileNotFoundError(f"No per-image result images or *_predictions.json files found below: {xai_results_root}")
 
     auc_columns = ["image_no", "image_id", "fixed_category", "method", "auc_ins", "auc_del", "time_exp", "time_eval"]
     auc_top_html = f"""
@@ -1187,7 +1223,14 @@ def run(args):
             input_data["f_S"] = f_S
             input_data["f_0"] = f_0
             timing_start = time.time()
-            utx.save_yolo_predictions(results, input_data, config, has_segmentation, top_k_classes)
+            utx.save_yolo_predictions(
+                results,
+                input_data,
+                config,
+                has_segmentation,
+                top_k_classes,
+                output_json=path_results_img / f"{image_no}_predictions.json",
+            )
             first_iteration_breakdown["save_predictions"] += time.time() - timing_start
 
             partitions, partition_capped, shap_values, auc_records = {}, {}, {}, []
