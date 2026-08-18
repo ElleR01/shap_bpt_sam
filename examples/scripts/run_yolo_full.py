@@ -16,6 +16,7 @@ import os
 import sys
 import time
 import traceback
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -52,6 +53,84 @@ PARTITION_TIME_BY_METHOD = {
     "refined": "time_refined",
     "refined_filled": "time_refined_filled",
 }
+BACKGROUND_REPLACEMENT_DETAILS = {
+    "noise": "Gaussian random background, blurred with sigma=2",
+    "blurred": "Input image blurred with Gaussian sigma=8",
+    "black": "All pixels set to 0",
+    "gray": "All pixels set to 127",
+    "white": "All pixels set to 255",
+    "full": "Average over black, gray, white, blurred, and noise backgrounds",
+}
+BACKGROUND_EXP_INDEX = {
+    "noise": 1,
+    "blurred": 2,
+    "black": 3,
+    "white": 4,
+    "full": 5,
+    "gray": 6,
+}
+
+
+def experiment_mapping_rows() -> list[dict]:
+    rows = []
+    for bg_type, index in BACKGROUND_EXP_INDEX.items():
+        rows.append(
+            {
+                "Exp No": f"E1_{index}",
+                "Model": "yolov11",
+                "Background Replacement Values": bg_type,
+                "Details": BACKGROUND_REPLACEMENT_DETAILS.get(bg_type, "-"),
+            }
+        )
+    for bg_type, index in BACKGROUND_EXP_INDEX.items():
+        rows.append(
+            {
+                "Exp No": f"E2_{index}",
+                "Model": "ResNet-50",
+                "Background Replacement Values": bg_type,
+                "Details": BACKGROUND_REPLACEMENT_DETAILS.get(bg_type, "-"),
+            }
+        )
+    return rows
+
+
+def infer_experiment_no(model_group: str, bg_type: str, explicit_exp_no: str | None = None) -> str:
+    if explicit_exp_no:
+        return explicit_exp_no
+    prefix = "E2" if model_group.lower().startswith("resnet") else "E1"
+    return f"{prefix}_{BACKGROUND_EXP_INDEX.get(bg_type, 0)}"
+
+
+def add_exp_suffix(results_name: str, exp_no: str | None) -> str:
+    if not exp_no:
+        return results_name
+    return results_name if results_name.endswith(f"_{exp_no}") else f"{results_name}_{exp_no}"
+
+
+def save_run_info(path_results: Path, run_info: dict) -> None:
+    path_results.mkdir(parents=True, exist_ok=True)
+    mapping_rows = experiment_mapping_rows()
+    mapping_df = pd.DataFrame(mapping_rows)
+    mapping_csv = path_results / "experiment_mapping.csv"
+    mapping_json = path_results / "experiment_mapping.json"
+    run_info_path = path_results / "run_info.json"
+
+    mapping_df.to_csv(mapping_csv, index=False)
+    mapping_json.write_text(json.dumps(mapping_rows, indent=2), encoding="utf-8")
+    run_info_path.write_text(
+        json.dumps(
+            {
+                **run_info,
+                "saved_at": datetime.now().isoformat(timespec="seconds"),
+                "experiment_mapping_csv": str(mapping_csv),
+                "experiment_mapping_json": str(mapping_json),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(f"Run info saved to: {run_info_path}")
+    print(f"Experiment mapping saved to: {mapping_csv}")
 
 
 def find_project_root(start: Path | None = None) -> Path:
@@ -947,8 +1026,32 @@ def run(args):
 
     masks_base_path = Path(config["data"]["masks_path"]) / config["data"]["mask_dir"] / config["data"]["mask_dir_final"]
     image_dir = config["data"]["image_dir"]
-    path_results = Path(config["output"]["dir"]) / config["output"].get("folder", "") / "xai_results"
+    exp_no = infer_experiment_no("yolov11", args.bg_type, args.exp_no)
+    results_name = add_exp_suffix(args.results_name, exp_no if args.exp_suffix else None)
+    path_results = Path(config["output"]["dir"]) / config["output"].get("folder", "") / results_name
     path_results.mkdir(parents=True, exist_ok=True)
+    save_run_info(
+        path_results,
+        {
+            "exp_no": exp_no,
+            "model_group": "yolov11",
+            "model": args.model,
+            "model_source": yolo_source,
+            "num_model_classes": yolo_class_count(model),
+            "background_replacement_values": args.bg_type,
+            "background_details": BACKGROUND_REPLACEMENT_DETAILS.get(args.bg_type, "-"),
+            "class_aggregation": args.class_aggregation,
+            "max_evals": args.max_evals,
+            "eval_batch_size": args.eval_batch_size,
+            "auc_batch_size": args.auc_batch_size,
+            "num_explained_classes": args.num_explained_classes,
+            "methods": METHOD_ORDER,
+            "config": args.config,
+            "masks_base_path": str(masks_base_path),
+            "image_dir": str(image_dir),
+            "results_dir": str(path_results),
+        },
+    )
     coco = COCO(config["data"]["annotation_file"])
 
     image_ids = [normalize_image_id(x) for x in args.image_ids] if args.image_ids else collect_image_ids(masks_base_path)
@@ -1231,6 +1334,9 @@ def parse_args():
     )
     parser.add_argument("--device", default=None, choices=["auto", "cpu", "cuda", "mps"], help="Override config device.")
     parser.add_argument("--output-dir", default=None, help="Override config output.dir; xai_results is created inside it.")
+    parser.add_argument("--results-name", default="xai_results", help="Base results folder name before experiment suffix.")
+    parser.add_argument("--exp-no", default=None, help="Override experiment number, e.g. E1_1.")
+    parser.add_argument("--no-exp-suffix", dest="exp_suffix", action="store_false", help="Do not append experiment number to results folder.")
     parser.add_argument("--max-evals", type=int, default=500)
     parser.add_argument("--limit", type=int, default=None, help="Limit number of images for a smoke test.")
     parser.add_argument("--image-ids", nargs="*", default=None, help="Optional explicit image ids.")
@@ -1246,7 +1352,7 @@ def parse_args():
     parser.add_argument("--no-auc", dest="compute_auc", action="store_false")
     parser.add_argument("--no-plots", dest="save_plots", action="store_false")
     parser.add_argument("--no-html", dest="build_html", action="store_false")
-    parser.set_defaults(compute_auc=True, save_plots=True, build_html=True)
+    parser.set_defaults(compute_auc=True, save_plots=True, build_html=True, exp_suffix=True)
     return parser.parse_args()
 
 

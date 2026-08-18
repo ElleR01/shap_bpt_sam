@@ -31,4 +31,4 @@ model:
 
 output:
   folder: "results"
-  dir: /Users/rashid/data/PhD/datacloud_data/repos/XAI/ShapBPT-SAM/shap_bpt_sam/examples/notebooks
+  dir: /Users/rashid/data/PhD/datacloud_data/repos/XAI/ShapBPT-SAM/shap_bpt_sam/examples/
