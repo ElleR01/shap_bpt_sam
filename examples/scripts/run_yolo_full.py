@@ -42,7 +42,7 @@ from ultralytics import YOLO
 from ultralytics.utils.downloads import attempt_download_asset, safe_download
 
 
-METHOD_ORDER = ["BPT", "sam", "coverage", "compact", "filled", "refined"]
+METHOD_ORDER = ["BPT", "sam", "coverage", "compact", "filled", "refined", "refined_filled"]
 PARTITION_TIME_BY_METHOD = {
     "BPT": None,
     "sam": "time_sam",
@@ -50,6 +50,7 @@ PARTITION_TIME_BY_METHOD = {
     "compact": "time_compact",
     "filled": "time_filler",
     "refined": "time_refined",
+    "refined_filled": "time_refined_filled",
 }
 
 
