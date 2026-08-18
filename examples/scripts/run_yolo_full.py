@@ -640,6 +640,32 @@ def partition_time_values_by_method(partition_summary_df: pd.DataFrame, methods:
     return values, labels
 
 
+def total_time_values_by_method(auc_all: pd.DataFrame, partition_summary_df: pd.DataFrame, methods: list[str]) -> tuple[list[np.ndarray], list[str]]:
+    auc_df = auc_all.copy()
+    if "image_id" not in auc_df.columns or "time_exp" not in auc_df.columns:
+        return [], []
+
+    auc_df["image_id_str"] = auc_df["image_id"].apply(normalize_image_id)
+    partition_df = cumulative_partition_time_frame(partition_summary_df)
+    if partition_df.empty or "image_id_str" not in partition_df.columns:
+        partition_df = pd.DataFrame({"image_id_str": auc_df["image_id_str"].dropna().unique()})
+
+    values, labels = [], []
+    for method in methods:
+        method_df = auc_df[auc_df["method"].astype(str) == method].copy()
+        if method_df.empty:
+            continue
+        partition_col = f"partition_time_{method}"
+        method_df["partition_time_sec"] = 0.0
+        if partition_col in partition_df.columns:
+            method_df = method_df.merge(partition_df[["image_id_str", partition_col]], on="image_id_str", how="left")
+            method_df["partition_time_sec"] = pd.to_numeric(method_df[partition_col], errors="coerce").fillna(0.0)
+        method_df["explanation_time_sec"] = pd.to_numeric(method_df["time_exp"], errors="coerce").fillna(0.0)
+        values.append((method_df["partition_time_sec"] + method_df["explanation_time_sec"]).values)
+        labels.append(method)
+    return values, labels
+
+
 def save_faithfulness_metric_boxplots(auc_all: pd.DataFrame, path_results: Path, max_evals: int, no_images: int) -> Path | None:
     methods = [method for method in METHOD_ORDER if method in set(auc_all["method"].dropna().astype(str))]
     if not methods:
@@ -778,7 +804,7 @@ def aggregate_auc_outputs(auc_all_df: pd.DataFrame, partition_summary_df: pd.Dat
     auc_all.to_csv(auc_all_path, index=False)
     summary.to_csv(auc_summary_path, index=False)
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4), sharey=False)
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4), sharey=False)
     methods = [m for m in METHOD_ORDER if m in set(auc_all["method"].dropna().astype(str))]
     for ax, metric, title, ylabel in [
         (axes[0], "auc_ins", "$\\mathit{AUC}^{+}$ across images", "Higher is better"),
@@ -791,7 +817,18 @@ def aggregate_auc_outputs(auc_all_df: pd.DataFrame, partition_summary_df: pd.Dat
         ax.grid(axis="y", alpha=0.25)
         ax.tick_params(axis="x", rotation=25)
 
-    plt.suptitle(f"Aggregate AUC Across {no_images} Images & Budget: {max_evals}", fontsize=16)
+    total_time_values, total_time_labels = total_time_values_by_method(auc_all, partition_summary_df, methods)
+    if total_time_values:
+        axes[2].boxplot(total_time_values, tick_labels=total_time_labels, showmeans=True, patch_artist=True)
+    else:
+        axes[2].text(0.5, 0.5, "No total time data", ha="center", va="center", transform=axes[2].transAxes)
+        axes[2].set_xticks([])
+    axes[2].set_title("Partition + explanation time")
+    axes[2].set_ylabel("Seconds (lower is better)")
+    axes[2].grid(axis="y", alpha=0.25)
+    axes[2].tick_params(axis="x", rotation=25)
+
+    plt.suptitle(f"Aggregate AUC and Total Time Across {no_images} Images & Budget: {max_evals}", fontsize=16)
     plt.tight_layout()
     plt.savefig(box_plot_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -1049,6 +1086,7 @@ def build_xai_results_webpage(xai_results_root: Path):
             image_dir = result_image_dir
         xai_path = next(iter(sorted(image_dir.glob("*_xai_results.png"))), image_dir / f"{image_id}_xai_results.png")
         auc_path = next(iter(sorted(image_dir.glob("auc_results_*.png"))), image_dir / f"auc_results_{folder_id}.png")
+        faithfulness_curves_path = next(iter(sorted(image_dir.glob("faithfulness_curves_*.png"))), image_dir / f"faithfulness_curves_{folder_id}.png")
         top_classes = pred.get("top_k_classes", []) or []
         top_class = top_classes[0] if top_classes else {}
         items.append(
@@ -1058,6 +1096,7 @@ def build_xai_results_webpage(xai_results_root: Path):
                 "pred": pred,
                 "xai_path": xai_path,
                 "auc_path": auc_path,
+                "faithfulness_curves_path": faithfulness_curves_path,
                 "summary": {
                     "image_id": image_id,
                     "fixed_category": pred.get("fixed_category", ""),
@@ -1082,6 +1121,7 @@ def build_xai_results_webpage(xai_results_root: Path):
                     "pred": {"image_id": image_id, "top_k_classes": []},
                     "xai_path": next(iter(sorted(image_dir.glob("*_xai_results.png"))), image_dir / f"{image_id}_xai_results.png"),
                     "auc_path": next(iter(sorted(image_dir.glob("auc_results_*.png"))), image_dir / f"auc_results_{folder_id}.png"),
+                    "faithfulness_curves_path": next(iter(sorted(image_dir.glob("faithfulness_curves_*.png"))), image_dir / f"faithfulness_curves_{folder_id}.png"),
                     "summary": {
                         "image_id": image_id,
                         "fixed_category": "",
@@ -1168,6 +1208,7 @@ def build_xai_results_webpage(xai_results_root: Path):
   </details>
   <figure><figcaption>XAI results</figcaption>{image_tag(item['xai_path'], item['image_id'] + ' XAI results')}</figure>
   <figure><figcaption>AUC curves</figcaption>{image_tag(item['auc_path'], item['image_id'] + ' AUC curves')}</figure>
+  <figure><figcaption>Faithfulness curves</figcaption>{image_tag(item['faithfulness_curves_path'], item['image_id'] + ' Faithfulness curves')}</figure>
 </section>"""
         )
 
@@ -1497,6 +1538,13 @@ def run(args):
                 if args.save_plots:
                     timing_start = time.time()
                     utx.plot_auc_results(
+                        auc_results,
+                        str(path_results_img),
+                        save_plot=True,
+                        image_no=image_no,
+                        destroy_figs=True,
+                    )
+                    utx.plot_faithfulness_curves(
                         auc_results,
                         str(path_results_img),
                         save_plot=True,

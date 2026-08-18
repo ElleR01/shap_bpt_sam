@@ -1521,6 +1521,7 @@ def compute_extra_faithfulness_metrics(
     batch_size=4,
     fractions=(0.10, 0.20, 0.30),
     sufficiency_fractions=(0.10, 0.20),
+    curve_fractions=None,
     sensitivity_samples=20,
     sensitivity_seed=0,
 ):
@@ -1529,6 +1530,9 @@ def compute_extra_faithfulness_metrics(
     denom = _safe_score_delta_denominator(f_S, f_0)
     all_true = np.ones(heatmap.shape, dtype=bool)
     masks, names = [], []
+    if curve_fractions is None:
+        curve_fractions = np.linspace(0.05, 0.95, 19)
+    curve_fractions = np.asarray(curve_fractions, dtype=float)
 
     for fraction in fractions:
         top_mask = _top_fraction_mask(heatmap, fraction)
@@ -1560,6 +1564,21 @@ def compute_extra_faithfulness_metrics(
         metrics[f"sufficiency_gap_at_{pct}"] = float(float(f_S) - y_suff)
         metrics[f"comprehensiveness_at_{pct}"] = float(float(f_S) - y_comp)
 
+    curve_masks = []
+    for fraction in curve_fractions:
+        top_mask = _top_fraction_mask(heatmap, fraction)
+        curve_masks.extend([np.logical_and(all_true, ~top_mask), top_mask])
+    curve_scores = _batched_class_scores(nu, curve_masks, predicted_cls, batch_size).reshape(len(curve_fractions), 2)
+    drop_scores = curve_scores[:, 0]
+    insert_scores = curve_scores[:, 1]
+    metrics["faithfulness_curves"] = {
+        "fractions": curve_fractions.astype(float).tolist(),
+        "drop_curve": ((float(f_S) - drop_scores) / denom).astype(float).tolist(),
+        "insert_curve": ((insert_scores - float(f_0)) / denom).astype(float).tolist(),
+        "sufficiency_curve": insert_scores.astype(float).tolist(),
+        "comprehensiveness_curve": (float(f_S) - drop_scores).astype(float).tolist(),
+    }
+
     rng = np.random.default_rng(sensitivity_seed)
     keep_masks = []
     attr_removed = []
@@ -1572,6 +1591,10 @@ def compute_extra_faithfulness_metrics(
     sensitivity_scores = _batched_class_scores(nu, keep_masks, predicted_cls, batch_size)
     actual_drop = float(f_S) - sensitivity_scores
     metrics["sensitivity_n_corr"] = _pearson_corr(attr_removed, actual_drop)
+    metrics["sensitivity_n_scatter"] = {
+        "attribution_removed": np.asarray(attr_removed, dtype=float).tolist(),
+        "confidence_drop": np.asarray(actual_drop, dtype=float).tolist(),
+    }
     metrics["stability_top10_jaccard"] = _rank_stability_score(heatmap, fraction=0.10, seed=sensitivity_seed)
     return metrics
 
@@ -1674,6 +1697,70 @@ def plot_auc_results(auc_results,path_results_img, figsize=(11, 4), fill_alpha=0
         plt.close(fig)
     plt.show()
     return fig, axes
+
+
+def plot_faithfulness_curves(auc_results, path_results_img, figsize=(15, 8), save_plot=False,
+                             image_no=None, destroy_figs=False):
+    fig, axes = plt.subplots(2, 3, figsize=figsize)
+    axes = axes.flatten()
+    cmap = plt.get_cmap('tab20')
+    curve_specs = [
+        (axes[0], 'drop_curve', 'Drop@fraction curve', 'Normalized confidence drop'),
+        (axes[1], 'insert_curve', 'Insert@fraction curve', 'Normalized confidence recovered'),
+        (axes[2], 'sufficiency_curve', 'Sufficiency curve', 'Model confidence'),
+        (axes[3], 'comprehensiveness_curve', 'Comprehensiveness curve', 'Confidence drop'),
+    ]
+
+    for idx, result in enumerate(auc_results):
+        curves = result.get('faithfulness_curves', {})
+        fractions = np.asarray(curves.get('fractions', []), dtype=float)
+        if fractions.size == 0:
+            continue
+        label = str(result.get('label', result.get('exp_code', f'method_{idx}')))
+        color = cmap(idx % cmap.N)
+        for ax, key, title, ylabel in curve_specs:
+            ys = np.asarray(curves.get(key, []), dtype=float)
+            if ys.size != fractions.size:
+                continue
+            ax.plot(fractions, ys, color=color, lw=1.8, alpha=0.9, label=label)
+            ax.scatter(fractions, ys, color=color, s=14, alpha=0.7)
+
+        scatter = result.get('sensitivity_n_scatter', {})
+        xs = np.asarray(scatter.get('attribution_removed', []), dtype=float)
+        ys = np.asarray(scatter.get('confidence_drop', []), dtype=float)
+        if xs.size and ys.size and xs.size == ys.size:
+            corr = result.get('sensitivity_n_corr', np.nan)
+            scatter_label = f"{label} r={corr:.3f}" if np.isfinite(corr) else label
+            axes[4].scatter(xs, ys, color=color, s=18, alpha=0.65, label=scatter_label)
+
+    for ax, _, title, ylabel in curve_specs:
+        ax.set_title(title)
+        ax.set_xlabel('Top attribution fraction')
+        ax.set_ylabel(ylabel)
+        ax.grid(alpha=0.25)
+
+    axes[4].set_title('Sensitivity-n scatter')
+    axes[4].set_xlabel('Attribution mass removed')
+    axes[4].set_ylabel('Actual confidence drop')
+    axes[4].grid(alpha=0.25)
+    axes[5].axis('off')
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    if handles:
+        axes[5].legend(handles, labels, loc='center', fontsize=9, title='Methods')
+    scatter_handles, scatter_labels = axes[4].get_legend_handles_labels()
+    if scatter_handles:
+        axes[4].legend(fontsize=7)
+
+    plt.suptitle('Faithfulness Curves and Sensitivity-n Scatter', fontsize=16)
+    plt.tight_layout()
+    if save_plot:
+        plt.savefig(os.path.join(path_results_img, f'faithfulness_curves_{image_no}.png'), dpi=300, bbox_inches='tight')
+    if destroy_figs:
+        plt.close(fig)
+    plt.show()
+    return fig, axes
+
 
 def auc_results_to_rows(auc_results, image_no=None, f_S=None, f_0=None,
                         image_id=None, fixed_category=None):

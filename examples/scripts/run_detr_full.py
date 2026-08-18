@@ -571,6 +571,13 @@ def run(args):
                 if args.save_plots:
                     timing_start = time.time()
                     utx.plot_auc_results(auc_results, str(path_results_img), save_plot=True, image_no=image_no, destroy_figs=True)
+                    utx.plot_faithfulness_curves(
+                        auc_results,
+                        str(path_results_img),
+                        save_plot=True,
+                        image_no=image_no,
+                        destroy_figs=True,
+                    )
                     first_iteration_breakdown["auc_plot"] += time.time() - timing_start
                 auc_table_rows.extend(
                     utx.auc_results_to_rows(auc_results, image_no=image_no, image_id=image_id, fixed_category=fixed_category, f_S=f_S, f_0=f_0)
