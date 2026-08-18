@@ -1705,11 +1705,15 @@ def plot_faithfulness_curves(auc_results, path_results_img, figsize=(15, 8), sav
     axes = axes.flatten()
     cmap = plt.get_cmap('tab20')
     curve_specs = [
-        (axes[0], 'drop_curve', 'Drop@fraction curve', 'Normalized confidence drop'),
-        (axes[1], 'insert_curve', 'Insert@fraction curve', 'Normalized confidence recovered'),
-        (axes[2], 'sufficiency_curve', 'Sufficiency curve', 'Model confidence'),
-        (axes[3], 'comprehensiveness_curve', 'Comprehensiveness curve', 'Confidence drop'),
+        (axes[0], 'drop_curve', 'Drop@fraction curve', 'Normalized confidence drop', 'Higher is better'),
+        (axes[1], 'insert_curve', 'Insert@fraction curve', 'Normalized confidence recovered', 'Higher is better'),
+        (axes[2], 'sufficiency_curve', 'Sufficiency curve', 'Model confidence', 'Higher is better'),
+        (axes[3], 'comprehensiveness_curve', 'Comprehensiveness curve', 'Confidence drop', 'Higher is better'),
     ]
+    curve_scores = {key: {} for _, key, _, _, _ in curve_specs}
+    curve_handles = {key: {} for _, key, _, _, _ in curve_specs}
+    scatter_scores = {}
+    scatter_handles = {}
 
     for idx, result in enumerate(auc_results):
         curves = result.get('faithfulness_curves', {})
@@ -1718,39 +1722,63 @@ def plot_faithfulness_curves(auc_results, path_results_img, figsize=(15, 8), sav
             continue
         label = str(result.get('label', result.get('exp_code', f'method_{idx}')))
         color = cmap(idx % cmap.N)
-        for ax, key, title, ylabel in curve_specs:
+        for ax, key, title, ylabel, direction in curve_specs:
             ys = np.asarray(curves.get(key, []), dtype=float)
             if ys.size != fractions.size:
                 continue
-            ax.plot(fractions, ys, color=color, lw=1.8, alpha=0.9, label=label)
+            line, = ax.plot(fractions, ys, color=color, lw=1.8, alpha=0.9, label=label)
             ax.scatter(fractions, ys, color=color, s=14, alpha=0.7)
+            curve_scores[key][label] = float(ys[-1])
+            curve_handles[key][label] = line
 
         scatter = result.get('sensitivity_n_scatter', {})
         xs = np.asarray(scatter.get('attribution_removed', []), dtype=float)
         ys = np.asarray(scatter.get('confidence_drop', []), dtype=float)
         if xs.size and ys.size and xs.size == ys.size:
             corr = result.get('sensitivity_n_corr', np.nan)
-            scatter_label = f"{label} r={corr:.3f}" if np.isfinite(corr) else label
-            axes[4].scatter(xs, ys, color=color, s=18, alpha=0.65, label=scatter_label)
+            scatter_label = f"{label} r={corr:.3f}" if np.isfinite(corr) else f"{label} r=nan"
+            handle = axes[4].scatter(xs, ys, color=color, s=18, alpha=0.65, label=scatter_label)
+            scatter_scores[scatter_label] = float(corr) if np.isfinite(corr) else -np.inf
+            scatter_handles[scatter_label] = handle
 
-    for ax, _, title, ylabel in curve_specs:
-        ax.set_title(title)
+    for ax, key, title, ylabel, direction in curve_specs:
+        ax.set_title(f"{title}\n{direction}; legend sorted best first")
         ax.set_xlabel('Top attribution fraction')
         ax.set_ylabel(ylabel)
         ax.grid(alpha=0.25)
+        ordered_labels = sorted(curve_scores[key], key=lambda name: curve_scores[key][name], reverse=True)
+        if ordered_labels:
+            ordered_handles = [curve_handles[key][name] for name in ordered_labels]
+            ordered_text = [f"{name} {curve_scores[key][name]:.3f}" for name in ordered_labels]
+            ax.legend(ordered_handles, ordered_text, fontsize=7, title='Best first', loc='best')
 
-    axes[4].set_title('Sensitivity-n scatter')
+    axes[4].set_title('Sensitivity-n scatter\nHigher correlation is better; legend sorted best first')
     axes[4].set_xlabel('Attribution mass removed')
     axes[4].set_ylabel('Actual confidence drop')
     axes[4].grid(alpha=0.25)
-    axes[5].axis('off')
+    ordered_scatter_labels = sorted(scatter_scores, key=lambda name: scatter_scores[name], reverse=True)
+    if ordered_scatter_labels:
+        axes[4].legend(
+            [scatter_handles[name] for name in ordered_scatter_labels],
+            ordered_scatter_labels,
+            fontsize=7,
+            title='Best first',
+            loc='best',
+        )
 
-    handles, labels = axes[0].get_legend_handles_labels()
-    if handles:
-        axes[5].legend(handles, labels, loc='center', fontsize=9, title='Methods')
-    scatter_handles, scatter_labels = axes[4].get_legend_handles_labels()
-    if scatter_handles:
-        axes[4].legend(fontsize=7)
+    axes[5].axis('off')
+    axes[5].text(
+        0.02,
+        0.98,
+        "Legend order:\n"
+        "- Curves: final value at largest fraction\n"
+        "- Sensitivity-n: Pearson correlation\n\n"
+        "All panels here are higher-is-better.",
+        ha='left',
+        va='top',
+        fontsize=11,
+        transform=axes[5].transAxes,
+    )
 
     plt.suptitle('Faithfulness Curves and Sensitivity-n Scatter', fontsize=16)
     plt.tight_layout()
