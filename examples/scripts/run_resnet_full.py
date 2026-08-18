@@ -619,7 +619,7 @@ def parse_args():
     parser.add_argument("--checkpoint", default=None, help="Optional ResNet-50 checkpoint path.")
     parser.add_argument("--device", default=None, choices=["auto", "cpu", "cuda", "mps"], help="Override config device.")
     parser.add_argument("--output-dir", default=None, help="Override config output.dir.")
-    parser.add_argument("--results-name", default="xai", help="Results folder created inside output dir/folder.")
+    parser.add_argument("--results-name", default="xai_results", help="Results folder created inside output dir/folder.")
     parser.add_argument("--exp-no", default=None, help="Override experiment number, e.g. E2_1.")
     parser.add_argument("--no-exp-suffix", dest="exp_suffix", action="store_false", help="Do not append experiment number to results folder.")
     parser.add_argument("--max-evals", type=int, default=500)
