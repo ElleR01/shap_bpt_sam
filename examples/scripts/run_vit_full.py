@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""Run a ResNet-50 + ShapBPT full-image-set experiment.
+"""Run a ViT-B/16 + ShapBPT full-image-set experiment.
 
 This is the classifier counterpart of run_yolo_full.py. It reuses the same
 partition, AUC, timing, and HTML summary helpers, but replaces YOLO detection
-with ResNet-50 ImageNet classification.
+with ViT-B/16 ImageNet classification.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ import shap_bpt
 import torch
 from PIL import Image
 from pycocotools.coco import COCO
-from torchvision.models import ResNet50_Weights, resnet50
+from torchvision.models import ViT_B_16_Weights, vit_b_16
 from tqdm.auto import tqdm
 
 from run_yolo_full import (
@@ -62,9 +62,9 @@ from run_yolo_full import (
 )
 
 
-def load_resnet50_model(args, device: torch.device):
-    weights = None if args.weights == "none" else getattr(ResNet50_Weights, args.weights)
-    model = resnet50(weights=weights)
+def load_vit_b_16_model(args, device: torch.device):
+    weights = None if args.weights == "none" else getattr(ViT_B_16_Weights, args.weights)
+    model = vit_b_16(weights=weights)
     categories = weights.meta["categories"] if weights is not None else [str(i) for i in range(1000)]
 
     if args.checkpoint:
@@ -75,7 +75,7 @@ def load_resnet50_model(args, device: torch.device):
 
     model.to(device)
     model.eval()
-    preprocess = weights.transforms() if weights is not None else ResNet50_Weights.IMAGENET1K_V2.transforms()
+    preprocess = weights.transforms() if weights is not None else ViT_B_16_Weights.IMAGENET1K_V1.transforms()
     return model, preprocess, categories
 
 
@@ -86,7 +86,7 @@ def image_to_uint8(image) -> np.ndarray:
     return np.clip(image, 0, 255).astype(np.uint8)
 
 
-def preprocess_resnet_batch(images, preprocess, device: torch.device):
+def preprocess_vit_batch(images, preprocess, device: torch.device):
     tensors = []
     for image in images:
         pil_image = Image.fromarray(image_to_uint8(image))
@@ -94,7 +94,7 @@ def preprocess_resnet_batch(images, preprocess, device: torch.device):
     return torch.stack(tensors, dim=0).to(device, non_blocking=True)
 
 
-def predict_resnet_batch(model, preprocess, device: torch.device, images, batch_size: int = 128):
+def predict_vit_batch(model, preprocess, device: torch.device, images, batch_size: int = 128):
     images = list(images)
     if not images:
         return np.empty((0, 1000))
@@ -103,15 +103,15 @@ def predict_resnet_batch(model, preprocess, device: torch.device, images, batch_
     with torch.no_grad():
         for start in range(0, len(images), batch_size):
             batch_images = images[start : start + batch_size]
-            batch = preprocess_resnet_batch(batch_images, preprocess, device)
+            batch = preprocess_vit_batch(batch_images, preprocess, device)
             logits = model(batch)
             probs = torch.softmax(logits, dim=1)
             outputs.append(probs.detach().cpu().numpy())
     return np.concatenate(outputs, axis=0)
 
 
-def make_predict_resnet_masked(model, preprocess, device, image_to_explain, background_image_set, batch_size: int):
-    def predict_resnet_masked(masks, verbose: bool = False):
+def make_predict_vit_masked(model, preprocess, device, image_to_explain, background_image_set, batch_size: int):
+    def predict_vit_masked(masks, verbose: bool = False):
         masked_images = []
         mask_indexes = []
         for mask_index, mask in enumerate(masks):
@@ -126,7 +126,7 @@ def make_predict_resnet_masked(model, preprocess, device, image_to_explain, back
                 masked_images.append(np.where(mask3, image_to_explain, repl))
                 mask_indexes.append(mask_index)
 
-        batch_preds = predict_resnet_batch(model, preprocess, device, masked_images, batch_size=batch_size)
+        batch_preds = predict_vit_batch(model, preprocess, device, masked_images, batch_size=batch_size)
         preds = np.zeros((len(masks), batch_preds.shape[1]))
         counts = np.zeros(len(masks))
         for mask_index, pred in zip(mask_indexes, batch_preds):
@@ -134,14 +134,14 @@ def make_predict_resnet_masked(model, preprocess, device, image_to_explain, back
             counts[mask_index] += 1
         return preds / counts[:, None]
 
-    return predict_resnet_masked
+    return predict_vit_masked
 
 
-def load_resnet_image_to_explain(image_id: str, image_dir: str, model, preprocess, categories, device, bg_type: str, batch_size: int):
+def load_vit_image_to_explain(image_id: str, image_dir: str, model, preprocess, categories, device, bg_type: str, batch_size: int):
     image_path = Path(image_dir) / f"{image_id}.jpg"
     image, image_tensor, background_image_set, background_tensors = load_image(image_path, device=device, bg_type=bg_type)
-    predicted_fS = predict_resnet_batch(model, preprocess, device, [image], batch_size=batch_size)[0]
-    predicted_f0 = predict_resnet_batch(model, preprocess, device, background_image_set, batch_size=batch_size).mean(axis=0)
+    predicted_fS = predict_vit_batch(model, preprocess, device, [image], batch_size=batch_size)[0]
+    predicted_f0 = predict_vit_batch(model, preprocess, device, background_image_set, batch_size=batch_size).mean(axis=0)
     sorted_classes = np.flip(np.argsort(predicted_fS))
     predicted_cls = int(sorted_classes[0])
     return {
@@ -166,13 +166,13 @@ def top_k_classes(predictions: np.ndarray, categories, k: int = 5):
     return [(int(idx), str(categories[int(idx)]), float(predictions[int(idx)])) for idx in indexes]
 
 
-def save_resnet_predictions(input_data, path_results: Path, has_segmentation: bool, top_classes, model_name: str):
+def save_vit_predictions(input_data, path_results: Path, has_segmentation: bool, top_classes, model_name: str):
     image_no = int(input_data["fname"])
     path_results_img = path_results / str(image_no)
     path_results_img.mkdir(parents=True, exist_ok=True)
     summary = {
         "image_id": str(input_data["fname"]),
-        "model_type": "resnet50",
+        "model_type": "vit_b_16",
         "model_name": model_name,
         "fixed_category": input_data["fixed_category"],
         "explained_class": input_data["explained_class"],
@@ -190,17 +190,7 @@ def save_resnet_predictions(input_data, path_results: Path, has_segmentation: bo
     return summary
 
 
-def plot_resnet_xai(
-    input_data,
-    partitions,
-    shap_values,
-    categories,
-    image_id,
-    save_path: Path,
-    save_fig=False,
-    destroy_fig=False,
-    model_title="ResNet-50",
-):
+def plot_vit_xai(input_data, partitions, shap_values, categories, image_id, save_path: Path, save_fig=False, destroy_fig=False):
     import utils_sam as uts
     import utils_xai as utx
 
@@ -218,7 +208,7 @@ def plot_resnet_xai(
     for rank, cls in enumerate(input_data["sorted_classes"][:5], start=1):
         top_lines.append(f"{rank}. {categories[int(cls)]}: {input_data['predicted_fS'][int(cls)]:.4f}")
     axes[1].axis("off")
-    axes[1].set_title(f"{model_title} Top Classes")
+    axes[1].set_title("ViT-B/16 Top Classes")
     axes[1].text(0.0, 0.95, "\n".join(top_lines), va="top", ha="left", fontsize=11, transform=axes[1].transAxes)
 
     mask_type = "sam" if "sam" in partitions else next(iter(partitions), None)
@@ -273,12 +263,12 @@ def run(args):
         config["output"]["folder"] = ""
 
     device = select_device(args.device or config.get("device", "auto"))
-    model, preprocess, categories = load_resnet50_model(args, device)
+    model, preprocess, categories = load_vit_b_16_model(args, device)
 
     print(f"Project root: {project_root}")
     print(f"Device: {device}")
-    print(f"Model: ResNet-50")
-    print(f"ResNet weights: {args.weights}")
+    print(f"Model: ViT-B/16")
+    print(f"ViT weights: {args.weights}")
     if args.checkpoint:
         print(f"Checkpoint: {args.checkpoint}")
     print(f"Classes: {len(categories)}")
@@ -291,7 +281,7 @@ def run(args):
             f"max_evals={args.max_evals}, "
             f"explain_batch_size={args.eval_batch_size}, "
             f"auc_eval_batch_size={args.auc_batch_size}, "
-            f"resnet_batch_size={args.resnet_batch_size}, "
+            f"vit_batch_size={args.vit_batch_size}, "
             f"methods={','.join(METHOD_ORDER)}, "
             f"num_explained_classes={args.num_explained_classes}, "
             f"bg_type={args.bg_type}, "
@@ -301,7 +291,7 @@ def run(args):
 
     masks_base_path = Path(config["data"]["masks_path"]) / config["data"]["mask_dir"] / config["data"]["mask_dir_final"]
     image_dir = config["data"]["image_dir"]
-    exp_no = infer_experiment_no("resnet50", args.bg_type, args.exp_no)
+    exp_no = infer_experiment_no("vit_b_16", args.bg_type, args.exp_no)
     results_name = add_exp_suffix(args.results_name, exp_no if args.exp_suffix else None)
     path_results = Path(config["output"]["dir"]) / config["output"].get("folder", "") / results_name
     path_results.mkdir(parents=True, exist_ok=True)
@@ -309,8 +299,8 @@ def run(args):
         path_results,
         {
             "exp_no": exp_no,
-            "model_group": "ResNet-50",
-            "model": "resnet50",
+            "model_group": "ViT-B/16",
+            "model": "vit_b_16",
             "weights": args.weights,
             "checkpoint": args.checkpoint,
             "num_model_classes": len(categories),
@@ -320,7 +310,7 @@ def run(args):
             "max_evals": args.max_evals,
             "eval_batch_size": args.eval_batch_size,
             "auc_batch_size": args.auc_batch_size,
-            "resnet_batch_size": args.resnet_batch_size,
+            "vit_batch_size": args.vit_batch_size,
             "num_explained_classes": args.num_explained_classes,
             "methods": METHOD_ORDER,
             "config": args.config,
@@ -354,7 +344,7 @@ def run(args):
     iteration_durations = []
     method_progress = args.verbose_level in {"medium", "high"}
 
-    for iteration_index, image_id in enumerate(tqdm(image_ids, desc="Full ResNet XAI", position=0, dynamic_ncols=True), start=1):
+    for iteration_index, image_id in enumerate(tqdm(image_ids, desc="Full ViT XAI", position=0, dynamic_ncols=True), start=1):
         iteration_start = time.time()
         first_iteration_breakdown = {
             "load_image_and_target": 0.0,
@@ -380,7 +370,7 @@ def run(args):
                 print(f"Image: {image_id}")
 
             timing_start = time.time()
-            input_data = load_resnet_image_to_explain(
+            input_data = load_vit_image_to_explain(
                 image_id,
                 image_dir,
                 model=model,
@@ -388,7 +378,7 @@ def run(args):
                 categories=categories,
                 device=device,
                 bg_type=args.bg_type,
-                batch_size=args.resnet_batch_size,
+                batch_size=args.vit_batch_size,
             )
             first_iteration_breakdown["load_image_and_target"] += time.time() - timing_start
 
@@ -400,13 +390,13 @@ def run(args):
             path_results_img = path_results / str(image_no)
             path_results_img.mkdir(parents=True, exist_ok=True)
 
-            predict_masked = make_predict_resnet_masked(
+            predict_masked = make_predict_vit_masked(
                 model,
                 preprocess,
                 device,
                 input_data["image_to_explain"],
                 input_data["background_image_set"],
-                batch_size=args.resnet_batch_size,
+                batch_size=args.vit_batch_size,
             )
             explainer = shap_bpt.Explainer(
                 predict_masked,
@@ -423,7 +413,7 @@ def run(args):
 
             timing_start = time.time()
             top_classes = top_k_classes(input_data["predicted_fS"], categories, k=args.top_k)
-            save_resnet_predictions(input_data, path_results, has_segmentation, top_classes, model_name="resnet50")
+            save_vit_predictions(input_data, path_results, has_segmentation, top_classes, model_name="vit_b_16")
             first_iteration_breakdown["save_predictions"] += time.time() - timing_start
 
             partitions, partition_capped, shap_values, auc_records = {}, {}, {}, []
@@ -493,7 +483,7 @@ def run(args):
 
             if args.save_plots:
                 timing_start = time.time()
-                plot_resnet_xai(
+                plot_vit_xai(
                     input_data,
                     partitions,
                     shap_values,
@@ -615,12 +605,12 @@ def run(args):
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="MSCOCO_mac", help="Config name from examples/configs or path to YAML.")
-    parser.add_argument("--weights", default="IMAGENET1K_V2", choices=["IMAGENET1K_V1", "IMAGENET1K_V2", "DEFAULT", "none"])
-    parser.add_argument("--checkpoint", default=None, help="Optional ResNet-50 checkpoint path.")
+    parser.add_argument("--weights", default="IMAGENET1K_V1", choices=["IMAGENET1K_V1", "DEFAULT", "none"])
+    parser.add_argument("--checkpoint", default=None, help="Optional ViT-B/16 checkpoint path.")
     parser.add_argument("--device", default=None, choices=["auto", "cpu", "cuda", "mps"], help="Override config device.")
     parser.add_argument("--output-dir", default=None, help="Override config output.dir.")
-    parser.add_argument("--results-name", default="xai", help="Results folder created inside output dir/folder.")
-    parser.add_argument("--exp-no", default=None, help="Override experiment number, e.g. E2_1.")
+    parser.add_argument("--results-name", default="xai_results", help="Base results folder name before experiment suffix.")
+    parser.add_argument("--exp-no", default=None, help="Override experiment number, e.g. E3_1.")
     parser.add_argument("--no-exp-suffix", dest="exp_suffix", action="store_false", help="Do not append experiment number to results folder.")
     parser.add_argument("--max-evals", type=int, default=500)
     parser.add_argument("--limit", type=int, default=None, help="Limit number of images for a smoke test.")
@@ -629,7 +619,7 @@ def parse_args():
     parser.add_argument("--num-explained-classes", type=int, default=4)
     parser.add_argument("--eval-batch-size", type=int, default=256)
     parser.add_argument("--auc-batch-size", type=int, default=128)
-    parser.add_argument("--resnet-batch-size", type=int, default=256)
+    parser.add_argument("--vit-batch-size", type=int, default=256)
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--verbose-level", default="low", choices=["low", "medium", "high"])

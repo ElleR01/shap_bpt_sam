@@ -69,35 +69,42 @@ BACKGROUND_EXP_INDEX = {
     "full": 5,
     "gray": 6,
 }
+MODEL_EXP_PREFIX = {
+    "yolo": ("E1", "yolov11"),
+    "yolov11": ("E1", "yolov11"),
+    "resnet": ("E2", "ResNet-50"),
+    "resnet50": ("E2", "ResNet-50"),
+    "vit": ("E3", "ViT-B/16"),
+    "vit_b_16": ("E3", "ViT-B/16"),
+    "detr": ("E4", "DETR"),
+}
 
 
 def experiment_mapping_rows() -> list[dict]:
     rows = []
-    for bg_type, index in BACKGROUND_EXP_INDEX.items():
-        rows.append(
-            {
-                "Exp No": f"E1_{index}",
-                "Model": "yolov11",
-                "Background Replacement Values": bg_type,
-                "Details": BACKGROUND_REPLACEMENT_DETAILS.get(bg_type, "-"),
-            }
-        )
-    for bg_type, index in BACKGROUND_EXP_INDEX.items():
-        rows.append(
-            {
-                "Exp No": f"E2_{index}",
-                "Model": "ResNet-50",
-                "Background Replacement Values": bg_type,
-                "Details": BACKGROUND_REPLACEMENT_DETAILS.get(bg_type, "-"),
-            }
-        )
+    for prefix, model_name in [
+        ("E1", "yolov11"),
+        ("E2", "ResNet-50"),
+        ("E3", "ViT-B/16"),
+        ("E4", "DETR"),
+    ]:
+        for bg_type, index in BACKGROUND_EXP_INDEX.items():
+            rows.append(
+                {
+                    "Exp No": f"{prefix}_{index}",
+                    "Model": model_name,
+                    "Background Replacement Values": bg_type,
+                    "Details": BACKGROUND_REPLACEMENT_DETAILS.get(bg_type, "-"),
+                }
+            )
     return rows
 
 
 def infer_experiment_no(model_group: str, bg_type: str, explicit_exp_no: str | None = None) -> str:
     if explicit_exp_no:
         return explicit_exp_no
-    prefix = "E2" if model_group.lower().startswith("resnet") else "E1"
+    key = model_group.lower().replace("-", "").replace("/", "_")
+    prefix = MODEL_EXP_PREFIX.get(key, ("E1", model_group))[0]
     return f"{prefix}_{BACKGROUND_EXP_INDEX.get(bg_type, 0)}"
 
 

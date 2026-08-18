@@ -1,27 +1,23 @@
 #!/usr/bin/env python
-"""Run a ResNet-50 + ShapBPT full-image-set experiment.
+"""Run a DETR + ShapBPT full-image-set experiment.
 
-This is the classifier counterpart of run_yolo_full.py. It reuses the same
-partition, AUC, timing, and HTML summary helpers, but replaces YOLO detection
-with ResNet-50 ImageNet classification.
+This detection runner uses Hugging Face transformers for DETR. Install
+`transformers` in the runtime environment before executing the experiment.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 import traceback
-from math import ceil
 from pathlib import Path
 
 PROJECT_ROOT_HINT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT_HINT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT_HINT))
 
-import cv2
 import matplotlib
 
 matplotlib.use("Agg")
@@ -30,9 +26,9 @@ import numpy as np
 import pandas as pd
 import shap_bpt
 import torch
+from matplotlib.patches import Rectangle
 from PIL import Image
 from pycocotools.coco import COCO
-from torchvision.models import ResNet50_Weights, resnet50
 from tqdm.auto import tqdm
 
 from run_yolo_full import (
@@ -62,21 +58,21 @@ from run_yolo_full import (
 )
 
 
-def load_resnet50_model(args, device: torch.device):
-    weights = None if args.weights == "none" else getattr(ResNet50_Weights, args.weights)
-    model = resnet50(weights=weights)
-    categories = weights.meta["categories"] if weights is not None else [str(i) for i in range(1000)]
+def load_detr_model(model_name: str, device: torch.device):
+    try:
+        from transformers import DetrForObjectDetection, DetrImageProcessor
+    except ImportError as exc:
+        raise ImportError(
+            "DETR runner requires transformers. Install it with `pip install transformers` "
+            "or load the dependency on the Epito environment before running."
+        ) from exc
 
-    if args.checkpoint:
-        checkpoint = torch.load(args.checkpoint, map_location="cpu")
-        state_dict = checkpoint.get("state_dict", checkpoint.get("model", checkpoint)) if isinstance(checkpoint, dict) else checkpoint
-        cleaned = {key.replace("module.", ""): value for key, value in state_dict.items()}
-        model.load_state_dict(cleaned)
-
+    processor = DetrImageProcessor.from_pretrained(model_name)
+    model = DetrForObjectDetection.from_pretrained(model_name)
     model.to(device)
     model.eval()
-    preprocess = weights.transforms() if weights is not None else ResNet50_Weights.IMAGENET1K_V2.transforms()
-    return model, preprocess, categories
+    id2label = {int(k): str(v) for k, v in model.config.id2label.items()}
+    return model, processor, id2label
 
 
 def image_to_uint8(image) -> np.ndarray:
@@ -86,32 +82,55 @@ def image_to_uint8(image) -> np.ndarray:
     return np.clip(image, 0, 255).astype(np.uint8)
 
 
-def preprocess_resnet_batch(images, preprocess, device: torch.device):
-    tensors = []
-    for image in images:
-        pil_image = Image.fromarray(image_to_uint8(image))
-        tensors.append(preprocess(pil_image))
-    return torch.stack(tensors, dim=0).to(device, non_blocking=True)
+def detr_result_to_scores(result: dict, num_classes: int, aggregate: str = "sum"):
+    scores = np.zeros(num_classes)
+    for cls, score in zip(result["labels"].detach().cpu().numpy(), result["scores"].detach().cpu().numpy()):
+        cls = int(cls)
+        if cls >= num_classes:
+            continue
+        if aggregate == "max":
+            scores[cls] = max(scores[cls], float(score))
+        else:
+            scores[cls] += float(score)
+    return scores
 
 
-def predict_resnet_batch(model, preprocess, device: torch.device, images, batch_size: int = 128):
-    images = list(images)
+def predict_detr_detections(model, processor, device: torch.device, image, threshold: float = 0.3):
+    pil_image = Image.fromarray(image_to_uint8(image))
+    with torch.no_grad():
+        inputs = processor(images=[pil_image], return_tensors="pt")
+        inputs = {key: value.to(device) for key, value in inputs.items()}
+        outputs = model(**inputs)
+        target_sizes = torch.tensor([pil_image.size[::-1]], device=device)
+        result = processor.post_process_object_detection(outputs, threshold=threshold, target_sizes=target_sizes)[0]
+    return {
+        "scores": result["scores"].detach().cpu().numpy(),
+        "labels": result["labels"].detach().cpu().numpy(),
+        "boxes": result["boxes"].detach().cpu().numpy(),
+    }
+
+
+def predict_detr_batch(model, processor, device: torch.device, images, batch_size: int = 32, threshold: float = 0.0, aggregate: str = "sum"):
+    images = [Image.fromarray(image_to_uint8(image)) for image in images]
     if not images:
-        return np.empty((0, 1000))
+        return np.empty((0, len(model.config.id2label)))
 
-    outputs = []
+    outputs_all = []
+    num_classes = len(model.config.id2label)
     with torch.no_grad():
         for start in range(0, len(images), batch_size):
             batch_images = images[start : start + batch_size]
-            batch = preprocess_resnet_batch(batch_images, preprocess, device)
-            logits = model(batch)
-            probs = torch.softmax(logits, dim=1)
-            outputs.append(probs.detach().cpu().numpy())
-    return np.concatenate(outputs, axis=0)
+            inputs = processor(images=batch_images, return_tensors="pt")
+            inputs = {key: value.to(device) for key, value in inputs.items()}
+            outputs = model(**inputs)
+            target_sizes = torch.tensor([image.size[::-1] for image in batch_images], device=device)
+            results = processor.post_process_object_detection(outputs, threshold=threshold, target_sizes=target_sizes)
+            outputs_all.extend(detr_result_to_scores(result, num_classes, aggregate=aggregate) for result in results)
+    return np.stack(outputs_all, axis=0)
 
 
-def make_predict_resnet_masked(model, preprocess, device, image_to_explain, background_image_set, batch_size: int):
-    def predict_resnet_masked(masks, verbose: bool = False):
+def make_predict_detr_masked(model, processor, device, image_to_explain, background_image_set, batch_size: int, threshold: float, aggregate: str):
+    def predict_detr_masked(masks, verbose: bool = False):
         masked_images = []
         mask_indexes = []
         for mask_index, mask in enumerate(masks):
@@ -126,7 +145,15 @@ def make_predict_resnet_masked(model, preprocess, device, image_to_explain, back
                 masked_images.append(np.where(mask3, image_to_explain, repl))
                 mask_indexes.append(mask_index)
 
-        batch_preds = predict_resnet_batch(model, preprocess, device, masked_images, batch_size=batch_size)
+        batch_preds = predict_detr_batch(
+            model,
+            processor,
+            device,
+            masked_images,
+            batch_size=batch_size,
+            threshold=threshold,
+            aggregate=aggregate,
+        )
         preds = np.zeros((len(masks), batch_preds.shape[1]))
         counts = np.zeros(len(masks))
         for mask_index, pred in zip(mask_indexes, batch_preds):
@@ -134,14 +161,17 @@ def make_predict_resnet_masked(model, preprocess, device, image_to_explain, back
             counts[mask_index] += 1
         return preds / counts[:, None]
 
-    return predict_resnet_masked
+    return predict_detr_masked
 
 
-def load_resnet_image_to_explain(image_id: str, image_dir: str, model, preprocess, categories, device, bg_type: str, batch_size: int):
+def load_detr_image_to_explain(image_id: str, image_dir: str, model, processor, id2label, device, bg_type: str, batch_size: int, threshold: float, aggregate: str):
     image_path = Path(image_dir) / f"{image_id}.jpg"
     image, image_tensor, background_image_set, background_tensors = load_image(image_path, device=device, bg_type=bg_type)
-    predicted_fS = predict_resnet_batch(model, preprocess, device, [image], batch_size=batch_size)[0]
-    predicted_f0 = predict_resnet_batch(model, preprocess, device, background_image_set, batch_size=batch_size).mean(axis=0)
+    predicted_fS = predict_detr_batch(model, processor, device, [image], batch_size=batch_size, threshold=threshold, aggregate=aggregate)[0]
+    detections = predict_detr_detections(model, processor, device, image, threshold=threshold)
+    predicted_f0 = predict_detr_batch(
+        model, processor, device, background_image_set, batch_size=batch_size, threshold=threshold, aggregate=aggregate
+    ).mean(axis=0)
     sorted_classes = np.flip(np.argsort(predicted_fS))
     predicted_cls = int(sorted_classes[0])
     return {
@@ -151,35 +181,50 @@ def load_resnet_image_to_explain(image_id: str, image_dir: str, model, preproces
         "background_image_set": background_image_set,
         "background_tensors": background_tensors,
         "predicted_fS": predicted_fS,
+        "detections": detections,
         "sorted_classes": sorted_classes,
         "sorted_probs": predicted_fS[sorted_classes],
         "predicted_cls": predicted_cls,
-        "fixed_category": categories[predicted_cls],
+        "fixed_category": id2label.get(predicted_cls, str(predicted_cls)),
         "f_S": float(predicted_fS[predicted_cls]),
         "predicted_f0": predicted_f0,
         "f_0": float(predicted_f0[predicted_cls]),
     }
 
 
-def top_k_classes(predictions: np.ndarray, categories, k: int = 5):
+def top_k_classes(predictions: np.ndarray, id2label, k: int = 5):
     indexes = np.flip(np.argsort(predictions))[:k]
-    return [(int(idx), str(categories[int(idx)]), float(predictions[int(idx)])) for idx in indexes]
+    return [(int(idx), str(id2label.get(int(idx), idx)), float(predictions[int(idx)])) for idx in indexes]
 
 
-def save_resnet_predictions(input_data, path_results: Path, has_segmentation: bool, top_classes, model_name: str):
+def save_detr_predictions(input_data, path_results: Path, has_segmentation: bool, top_classes, model_name: str, threshold: float):
     image_no = int(input_data["fname"])
     path_results_img = path_results / str(image_no)
     path_results_img.mkdir(parents=True, exist_ok=True)
     summary = {
         "image_id": str(input_data["fname"]),
-        "model_type": "resnet50",
+        "model_type": "detr",
         "model_name": model_name,
+        "detr_threshold": threshold,
         "fixed_category": input_data["fixed_category"],
         "explained_class": input_data["explained_class"],
         "f_S": float(input_data["f_S"]),
         "f_0": float(input_data["f_0"]),
         "has_segmentation": bool(has_segmentation),
         "speed": {},
+        "detections": [
+            {
+                "class_id": int(label),
+                "class_name": str(input_data.get("id2label", {}).get(int(label), label)),
+                "confidence": float(score),
+                "box_xyxy": [float(x) for x in box],
+            }
+            for score, label, box in zip(
+                input_data.get("detections", {}).get("scores", []),
+                input_data.get("detections", {}).get("labels", []),
+                input_data.get("detections", {}).get("boxes", []),
+            )
+        ],
         "top_k_classes": [
             {"class_id": class_id, "class_name": class_name, "confidence": confidence}
             for class_id, class_name, confidence in top_classes
@@ -190,23 +235,51 @@ def save_resnet_predictions(input_data, path_results: Path, has_segmentation: bo
     return summary
 
 
-def plot_resnet_xai(
-    input_data,
-    partitions,
-    shap_values,
-    categories,
-    image_id,
-    save_path: Path,
-    save_fig=False,
-    destroy_fig=False,
-    model_title="ResNet-50",
-):
+def plot_detr_predictions(ax, image, detections, id2label, max_detections: int = 20):
+    ax.imshow(image)
+    ax.axis("off")
+    scores = detections.get("scores", [])
+    labels = detections.get("labels", [])
+    boxes = detections.get("boxes", [])
+    if len(scores) == 0:
+        ax.set_title("DETR Detections: none")
+        return
+
+    order = np.argsort(scores)[::-1][:max_detections]
+    cmap = plt.get_cmap("tab20")
+    for rank, det_index in enumerate(order):
+        score = float(scores[det_index])
+        label = int(labels[det_index])
+        x1, y1, x2, y2 = [float(v) for v in boxes[det_index]]
+        color = cmap(rank % cmap.N)
+        ax.add_patch(
+            Rectangle(
+                (x1, y1),
+                x2 - x1,
+                y2 - y1,
+                linewidth=2,
+                edgecolor=color,
+                facecolor="none",
+            )
+        )
+        ax.text(
+            x1,
+            max(0, y1 - 4),
+            f"{id2label.get(label, label)} {score:.2f}",
+            color="white",
+            fontsize=9,
+            bbox={"facecolor": color, "alpha": 0.75, "pad": 2, "edgecolor": "none"},
+        )
+    ax.set_title(f"DETR Detections ({len(scores)})")
+
+
+def plot_detr_xai(input_data, partitions, shap_values, id2label, image_id, save_path: Path, save_fig=False, destroy_fig=False):
     import utils_sam as uts
     import utils_xai as utx
 
     n_panels = 3 + len(shap_values)
     ncols = 3
-    nrows = ceil(n_panels / ncols)
+    nrows = int(np.ceil(n_panels / ncols))
     fig, axes = plt.subplots(nrows, ncols, figsize=(15, 3.6 * nrows))
     axes = np.atleast_1d(axes).flatten()
 
@@ -214,12 +287,12 @@ def plot_resnet_xai(
     axes[0].set_title(f"Original Image - {image_id}")
     axes[0].axis("off")
 
-    top_lines = []
-    for rank, cls in enumerate(input_data["sorted_classes"][:5], start=1):
-        top_lines.append(f"{rank}. {categories[int(cls)]}: {input_data['predicted_fS'][int(cls)]:.4f}")
-    axes[1].axis("off")
-    axes[1].set_title(f"{model_title} Top Classes")
-    axes[1].text(0.0, 0.95, "\n".join(top_lines), va="top", ha="left", fontsize=11, transform=axes[1].transAxes)
+    plot_detr_predictions(
+        axes[1],
+        input_data["image_to_explain"],
+        input_data.get("detections", {}),
+        id2label,
+    )
 
     mask_type = "sam" if "sam" in partitions else next(iter(partitions), None)
     if mask_type is not None:
@@ -273,15 +346,13 @@ def run(args):
         config["output"]["folder"] = ""
 
     device = select_device(args.device or config.get("device", "auto"))
-    model, preprocess, categories = load_resnet50_model(args, device)
+    model, processor, id2label = load_detr_model(args.model_name, device)
 
     print(f"Project root: {project_root}")
     print(f"Device: {device}")
-    print(f"Model: ResNet-50")
-    print(f"ResNet weights: {args.weights}")
-    if args.checkpoint:
-        print(f"Checkpoint: {args.checkpoint}")
-    print(f"Classes: {len(categories)}")
+    print(f"Model: DETR")
+    print(f"DETR model: {args.model_name}")
+    print(f"Classes: {len(id2label)}")
     print(f"shap_bpt version: {shap_bpt.__version__}")
 
     resource_logging = args.verbose_level in {"medium", "high"}
@@ -291,9 +362,11 @@ def run(args):
             f"max_evals={args.max_evals}, "
             f"explain_batch_size={args.eval_batch_size}, "
             f"auc_eval_batch_size={args.auc_batch_size}, "
-            f"resnet_batch_size={args.resnet_batch_size}, "
+            f"detr_batch_size={args.detr_batch_size}, "
+            f"threshold={args.threshold}, "
             f"methods={','.join(METHOD_ORDER)}, "
             f"num_explained_classes={args.num_explained_classes}, "
+            f"class_aggregation={args.class_aggregation}, "
             f"bg_type={args.bg_type}, "
             f"verbose_k={args.verbose_k}"
         )
@@ -301,7 +374,7 @@ def run(args):
 
     masks_base_path = Path(config["data"]["masks_path"]) / config["data"]["mask_dir"] / config["data"]["mask_dir_final"]
     image_dir = config["data"]["image_dir"]
-    exp_no = infer_experiment_no("resnet50", args.bg_type, args.exp_no)
+    exp_no = infer_experiment_no("detr", args.bg_type, args.exp_no)
     results_name = add_exp_suffix(args.results_name, exp_no if args.exp_suffix else None)
     path_results = Path(config["output"]["dir"]) / config["output"].get("folder", "") / results_name
     path_results.mkdir(parents=True, exist_ok=True)
@@ -309,18 +382,17 @@ def run(args):
         path_results,
         {
             "exp_no": exp_no,
-            "model_group": "ResNet-50",
-            "model": "resnet50",
-            "weights": args.weights,
-            "checkpoint": args.checkpoint,
-            "num_model_classes": len(categories),
+            "model_group": "DETR",
+            "model": args.model_name,
+            "num_model_classes": len(id2label),
             "background_replacement_values": args.bg_type,
             "background_details": BACKGROUND_REPLACEMENT_DETAILS.get(args.bg_type, "-"),
-            "class_aggregation": None,
+            "class_aggregation": args.class_aggregation,
+            "detr_threshold": args.threshold,
             "max_evals": args.max_evals,
             "eval_batch_size": args.eval_batch_size,
             "auc_batch_size": args.auc_batch_size,
-            "resnet_batch_size": args.resnet_batch_size,
+            "detr_batch_size": args.detr_batch_size,
             "num_explained_classes": args.num_explained_classes,
             "methods": METHOD_ORDER,
             "config": args.config,
@@ -342,71 +414,60 @@ def run(args):
     image_ids = [normalize_image_id(x) for x in args.image_ids] if args.image_ids else collect_image_ids(masks_base_path)
     if args.limit is not None:
         image_ids = image_ids[: args.limit]
-
     print(f"Images to process: {len(image_ids)}")
     print(f"Masks: {masks_base_path}")
     print(f"Results: {path_results}")
 
     partition_summary_df = build_partition_summary(image_ids, masks_base_path, path_results, uts2)
-
     failures = []
     auc_table_rows = []
     iteration_durations = []
     method_progress = args.verbose_level in {"medium", "high"}
 
-    for iteration_index, image_id in enumerate(tqdm(image_ids, desc="Full ResNet XAI", position=0, dynamic_ncols=True), start=1):
+    for iteration_index, image_id in enumerate(tqdm(image_ids, desc="Full DETR XAI", position=0, dynamic_ncols=True), start=1):
         iteration_start = time.time()
-        first_iteration_breakdown = {
-            "load_image_and_target": 0.0,
-            "segmentation_lookup": 0.0,
-            "save_predictions": 0.0,
-            "load_partition_json": 0.0,
-            "load_partitions": 0.0,
-            "build_bpt": 0.0,
-            "explanation": 0.0,
-            "single_attribution_plots": 0.0,
-            "xai_grid_plot": 0.0,
-            "auc_compute": 0.0,
-            "auc_plot": 0.0,
-        }
+        first_iteration_breakdown = {key: 0.0 for key in [
+            "load_image_and_target", "segmentation_lookup", "save_predictions", "load_partition_json",
+            "load_partitions", "build_bpt", "explanation", "single_attribution_plots", "xai_grid_plot",
+            "auc_compute", "auc_plot",
+        ]}
         first_iteration_method_times = {}
         if resource_logging:
             reset_iteration_resource_counters(device)
-
         image_no = int(image_id)
         try:
-            if args.verbose:
-                print("=" * 100)
-                print(f"Image: {image_id}")
-
             timing_start = time.time()
-            input_data = load_resnet_image_to_explain(
+            input_data = load_detr_image_to_explain(
                 image_id,
                 image_dir,
-                model=model,
-                preprocess=preprocess,
-                categories=categories,
-                device=device,
-                bg_type=args.bg_type,
-                batch_size=args.resnet_batch_size,
+                model,
+                processor,
+                id2label,
+                device,
+                args.bg_type,
+                args.detr_batch_size,
+                args.threshold,
+                args.class_aggregation,
             )
             first_iteration_breakdown["load_image_and_target"] += time.time() - timing_start
-
+            input_data["id2label"] = id2label
             fixed_category = input_data["fixed_category"]
+
             timing_start = time.time()
             has_segmentation = image_has_segmentation(coco, image_no) if coco is not None else False
             first_iteration_breakdown["segmentation_lookup"] += time.time() - timing_start
 
             path_results_img = path_results / str(image_no)
             path_results_img.mkdir(parents=True, exist_ok=True)
-
-            predict_masked = make_predict_resnet_masked(
+            predict_masked = make_predict_detr_masked(
                 model,
-                preprocess,
+                processor,
                 device,
                 input_data["image_to_explain"],
                 input_data["background_image_set"],
-                batch_size=args.resnet_batch_size,
+                args.detr_batch_size,
+                args.threshold,
+                args.class_aggregation,
             )
             explainer = shap_bpt.Explainer(
                 predict_masked,
@@ -417,13 +478,19 @@ def run(args):
             predicted_cls = int(explainer.output_indexes[0])
             f_S = float(explainer.base_nuN[0])
             f_0 = float(explainer.base_nu0[0])
-            input_data["explained_class"] = categories[predicted_cls]
+            input_data["explained_class"] = id2label.get(predicted_cls, str(predicted_cls))
             input_data["f_S"] = f_S
             input_data["f_0"] = f_0
 
             timing_start = time.time()
-            top_classes = top_k_classes(input_data["predicted_fS"], categories, k=args.top_k)
-            save_resnet_predictions(input_data, path_results, has_segmentation, top_classes, model_name="resnet50")
+            save_detr_predictions(
+                input_data,
+                path_results,
+                has_segmentation,
+                top_k_classes(input_data["predicted_fS"], id2label, k=args.top_k),
+                model_name=args.model_name,
+                threshold=args.threshold,
+            )
             first_iteration_breakdown["save_predictions"] += time.time() - timing_start
 
             partitions, partition_capped, shap_values, auc_records = {}, {}, {}, []
@@ -431,17 +498,11 @@ def run(args):
             partition_results = uts2.load_json_partitions(str(masks_base_path), image_id, verbose=False)
             first_iteration_breakdown["load_partition_json"] += time.time() - timing_start
 
-            methods_iter = tqdm(
-                METHOD_ORDER,
-                desc=f"{image_id} methods",
-                leave=False,
-                position=1,
-                dynamic_ncols=True,
-                disable=not method_progress,
-            )
+            methods_iter = tqdm(METHOD_ORDER, desc=f"{image_id} methods", leave=False, position=1, dynamic_ncols=True, disable=not method_progress)
             for method in methods_iter:
                 if method_progress:
                     methods_iter.set_postfix_str(method)
+                    tqdm.write(f"{image_id}: starting {method}")
                 if method == "BPT":
                     bptree = None
                 else:
@@ -455,19 +516,12 @@ def run(args):
                     first_iteration_breakdown["build_bpt"] += time.time() - timing_start
 
                 start = time.time()
-                shap_values[method] = explainer.explain_instance(
-                    args.max_evals,
-                    bpt=bptree,
-                    method="BPT",
-                    batch_size=args.eval_batch_size,
-                )
+                shap_values[method] = explainer.explain_instance(args.max_evals, bpt=bptree, method="BPT", batch_size=args.eval_batch_size)
                 time_exp = time.time() - start
                 first_iteration_breakdown["explanation"] += time_exp
                 first_iteration_method_times[method] = time_exp
                 if method_progress:
                     methods_iter.set_postfix_str(f"{method}, exp={format_duration(time_exp)}")
-                if args.verbose_level == "high":
-                    print(f"{method}: Shapley sum={np.sum(shap_values[method][0])}")
 
                 if args.save_plots:
                     timing_start = time.time()
@@ -493,11 +547,11 @@ def run(args):
 
             if args.save_plots:
                 timing_start = time.time()
-                plot_resnet_xai(
+                plot_detr_xai(
                     input_data,
                     partitions,
                     shap_values,
-                    categories,
+                    id2label,
                     image_id,
                     save_path=path_results_img,
                     save_fig=True,
@@ -508,34 +562,15 @@ def run(args):
             if args.compute_auc:
                 timing_start = time.time()
                 auc_results = utx.compute_auc_results(
-                    auc_records,
-                    predict_masked,
-                    f_S,
-                    f_0,
-                    predicted_cls,
-                    batch_size=args.auc_batch_size,
-                    verbose=args.verbose_level == "high",
+                    auc_records, predict_masked, f_S, f_0, predicted_cls, batch_size=args.auc_batch_size, verbose=args.verbose_level == "high"
                 )
                 first_iteration_breakdown["auc_compute"] += time.time() - timing_start
                 if args.save_plots:
                     timing_start = time.time()
-                    utx.plot_auc_results(
-                        auc_results,
-                        str(path_results_img),
-                        save_plot=True,
-                        image_no=image_no,
-                        destroy_figs=True,
-                    )
+                    utx.plot_auc_results(auc_results, str(path_results_img), save_plot=True, image_no=image_no, destroy_figs=True)
                     first_iteration_breakdown["auc_plot"] += time.time() - timing_start
                 auc_table_rows.extend(
-                    utx.auc_results_to_rows(
-                        auc_results,
-                        image_no=image_no,
-                        image_id=image_id,
-                        fixed_category=fixed_category,
-                        f_S=f_S,
-                        f_0=f_0,
-                    )
+                    utx.auc_results_to_rows(auc_results, image_no=image_no, image_id=image_id, fixed_category=fixed_category, f_S=f_S, f_0=f_0)
                 )
                 current_run_path, current_auc_df = save_current_auc_table(auc_table_rows, path_results)
                 if resource_logging and (iteration_index == 1 or (args.verbose_k > 0 and iteration_index % args.verbose_k == 0)):
@@ -551,42 +586,20 @@ def run(args):
         finally:
             iteration_duration = time.time() - iteration_start
             iteration_durations.append(iteration_duration)
-            should_print_resources = (
-                resource_logging
-                and (iteration_index == 1 or (args.verbose_k > 0 and iteration_index % args.verbose_k == 0))
-            )
+            should_print_resources = resource_logging and (iteration_index == 1 or (args.verbose_k > 0 and iteration_index % args.verbose_k == 0))
             if should_print_resources:
                 pending = len(image_ids) - iteration_index
                 avg_time = sum(iteration_durations) / len(iteration_durations)
-                eta = avg_time * pending
-                resource_text = iteration_resource_summary(device)
                 tqdm.write(
                     f"Resources after {image_id} [{iteration_index}/{len(image_ids)}]: "
-                    f"iteration={format_duration(iteration_duration)}, "
-                    f"avg={format_duration(avg_time)}, "
-                    f"pending={pending}, "
-                    f"eta={format_duration(eta)}"
-                    f"{resource_text}"
+                    f"iteration={format_duration(iteration_duration)}, avg={format_duration(avg_time)}, "
+                    f"pending={pending}, eta={format_duration(avg_time * pending)}{iteration_resource_summary(device)}"
                 )
             if resource_logging and iteration_index == 1:
                 measured = sum(first_iteration_breakdown.values())
-                other = max(0.0, iteration_duration - measured)
-                breakdown_parts = [
-                    f"total={format_duration(iteration_duration)}",
-                    f"load={format_duration(first_iteration_breakdown['load_image_and_target'])}",
-                    f"seg={format_duration(first_iteration_breakdown['segmentation_lookup'])}",
-                    f"save_pred={format_duration(first_iteration_breakdown['save_predictions'])}",
-                    f"partition_json={format_duration(first_iteration_breakdown['load_partition_json'])}",
-                    f"partition_npys={format_duration(first_iteration_breakdown['load_partitions'])}",
-                    f"build_bpt={format_duration(first_iteration_breakdown['build_bpt'])}",
-                    f"explain={format_duration(first_iteration_breakdown['explanation'])}",
-                    f"single_plots={format_duration(first_iteration_breakdown['single_attribution_plots'])}",
-                    f"xai_plot={format_duration(first_iteration_breakdown['xai_grid_plot'])}",
-                    f"auc_compute={format_duration(first_iteration_breakdown['auc_compute'])}",
-                    f"auc_plot={format_duration(first_iteration_breakdown['auc_plot'])}",
-                    f"other={format_duration(other)}",
-                ]
-                tqdm.write("First image timing breakdown: " + ", ".join(breakdown_parts))
+                parts = [f"{key}={format_duration(value)}" for key, value in first_iteration_breakdown.items()]
+                parts.append(f"other={format_duration(max(0.0, iteration_duration - measured))}")
+                tqdm.write("First image timing breakdown: " + ", ".join(parts))
                 if first_iteration_method_times:
                     method_parts = [f"{method}={format_duration(first_iteration_method_times[method])}" for method in METHOD_ORDER if method in first_iteration_method_times]
                     tqdm.write("First image explanation by method: " + ", ".join(method_parts))
@@ -615,21 +628,22 @@ def run(args):
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="MSCOCO_mac", help="Config name from examples/configs or path to YAML.")
-    parser.add_argument("--weights", default="IMAGENET1K_V2", choices=["IMAGENET1K_V1", "IMAGENET1K_V2", "DEFAULT", "none"])
-    parser.add_argument("--checkpoint", default=None, help="Optional ResNet-50 checkpoint path.")
+    parser.add_argument("--model-name", default="facebook/detr-resnet-50", help="Hugging Face DETR model name or local path.")
     parser.add_argument("--device", default=None, choices=["auto", "cpu", "cuda", "mps"], help="Override config device.")
     parser.add_argument("--output-dir", default=None, help="Override config output.dir.")
-    parser.add_argument("--results-name", default="xai", help="Results folder created inside output dir/folder.")
-    parser.add_argument("--exp-no", default=None, help="Override experiment number, e.g. E2_1.")
+    parser.add_argument("--results-name", default="xai_results", help="Base results folder name before experiment suffix.")
+    parser.add_argument("--exp-no", default=None, help="Override experiment number, e.g. E4_1.")
     parser.add_argument("--no-exp-suffix", dest="exp_suffix", action="store_false", help="Do not append experiment number to results folder.")
     parser.add_argument("--max-evals", type=int, default=500)
     parser.add_argument("--limit", type=int, default=None, help="Limit number of images for a smoke test.")
     parser.add_argument("--image-ids", nargs="*", default=None, help="Optional explicit image ids.")
     parser.add_argument("--bg-type", default="noise", choices=["black", "gray", "white", "blurred", "noise", "full"])
+    parser.add_argument("--class-aggregation", default="sum", choices=["sum", "max"])
+    parser.add_argument("--threshold", type=float, default=0.3, help="DETR post-processing threshold for class aggregation.")
     parser.add_argument("--num-explained-classes", type=int, default=4)
-    parser.add_argument("--eval-batch-size", type=int, default=256)
-    parser.add_argument("--auc-batch-size", type=int, default=128)
-    parser.add_argument("--resnet-batch-size", type=int, default=256)
+    parser.add_argument("--eval-batch-size", type=int, default=128)
+    parser.add_argument("--auc-batch-size", type=int, default=64)
+    parser.add_argument("--detr-batch-size", type=int, default=32)
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--verbose-level", default="low", choices=["low", "medium", "high"])
