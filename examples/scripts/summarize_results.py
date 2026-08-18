@@ -105,7 +105,7 @@ def prepare_auc_table(auc_all_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def prepare_partition_summary(partition_summary_df: pd.DataFrame, auc_all_df: pd.DataFrame) -> pd.DataFrame:
-    time_cols = ["time_sam", "time_coverage", "time_compact", "time_filler", "time_refined"]
+    time_cols = ["time_sam", "time_coverage", "time_compact", "time_filler", "time_refined", "time_refined_filled"]
     if partition_summary_df.empty or "image_id" not in partition_summary_df.columns:
         print("Using zero partition times because partition_summary.csv is unavailable.")
         image_ids = auc_all_df["image_id"].dropna().astype(str).unique() if "image_id" in auc_all_df.columns else []

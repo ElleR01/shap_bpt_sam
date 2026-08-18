@@ -604,58 +604,138 @@ def save_current_auc_table(auc_table_rows: list[dict], path_results: Path) -> tu
     return current_run_path, auc_all_df
 
 
-def save_faithfulness_metric_boxplots(auc_all: pd.DataFrame, path_results: Path, max_evals: int, no_images: int) -> Path | None:
-    metric_columns = [metric for metric in FAITHFULNESS_METRIC_COLUMNS if metric in auc_all.columns]
-    if not metric_columns:
-        return None
+def cumulative_partition_time_frame(partition_summary_df: pd.DataFrame) -> pd.DataFrame:
+    if partition_summary_df.empty:
+        return pd.DataFrame()
 
+    df = partition_summary_df.copy()
+    for col in ["time_sam", "time_coverage", "time_compact", "time_filler", "time_refined", "time_refined_filled"]:
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    df["partition_time_BPT"] = 0.0
+    df["partition_time_sam"] = df["time_sam"]
+    df["partition_time_coverage"] = df["time_sam"] + df["time_coverage"]
+    df["partition_time_compact"] = df["time_sam"] + df["time_compact"]
+    df["partition_time_filled"] = df["time_sam"] + df["time_filler"]
+    df["partition_time_refined"] = df["time_sam"] + df["time_refined"]
+    df["partition_time_refined_filled"] = df["time_sam"] + df["time_refined_filled"]
+    if "image_id" in df.columns:
+        df["image_id_str"] = df["image_id"].apply(normalize_image_id)
+    return df
+
+
+def partition_time_values_by_method(partition_summary_df: pd.DataFrame, methods: list[str]) -> tuple[list[np.ndarray], list[str]]:
+    df = cumulative_partition_time_frame(partition_summary_df)
+    if df.empty:
+        return [], []
+
+    values, labels = [], []
+    for method in methods:
+        col = f"partition_time_{method}"
+        if col in df.columns:
+            values.append(df[col].dropna().astype(float).values)
+            labels.append(method)
+    return values, labels
+
+
+def save_faithfulness_metric_boxplots(auc_all: pd.DataFrame, path_results: Path, max_evals: int, no_images: int) -> Path | None:
     methods = [method for method in METHOD_ORDER if method in set(auc_all["method"].dropna().astype(str))]
     if not methods:
         return None
 
+    metric_groups = [
+        ("Deletion / Drop", [("drop_at_10", True), ("drop_at_20", True), ("drop_at_30", True)]),
+        ("Insertion", [("insert_at_10", True), ("insert_at_20", True), ("insert_at_30", True)]),
+        ("Sufficiency", [("sufficiency_at_10", True), ("sufficiency_at_20", True), ("sufficiency_gap_at_10", False), ("sufficiency_gap_at_20", False)]),
+        ("Comprehensiveness", [("comprehensiveness_at_10", True), ("comprehensiveness_at_20", True)]),
+        ("Sensitivity / Stability", [("sensitivity_n_corr", True), ("stability_top10_jaccard", True)]),
+    ]
     metric_titles = {
-        "drop_at_10": "Drop@10% (higher better)",
-        "drop_at_20": "Drop@20% (higher better)",
-        "drop_at_30": "Drop@30% (higher better)",
-        "insert_at_10": "Insert@10% (higher better)",
-        "insert_at_20": "Insert@20% (higher better)",
-        "insert_at_30": "Insert@30% (higher better)",
-        "sufficiency_at_10": "Sufficiency@10% (higher better)",
-        "sufficiency_at_20": "Sufficiency@20% (higher better)",
-        "sufficiency_gap_at_10": "Sufficiency Gap@10% (lower better)",
-        "sufficiency_gap_at_20": "Sufficiency Gap@20% (lower better)",
-        "comprehensiveness_at_10": "Comprehensiveness@10% (higher better)",
-        "comprehensiveness_at_20": "Comprehensiveness@20% (higher better)",
-        "sensitivity_n_corr": "Sensitivity-n Corr (higher better)",
-        "stability_top10_jaccard": "Top-10 Stability (higher better)",
+        "drop_at_10": "Drop@10%",
+        "drop_at_20": "Drop@20%",
+        "drop_at_30": "Drop@30%",
+        "insert_at_10": "Insert@10%",
+        "insert_at_20": "Insert@20%",
+        "insert_at_30": "Insert@30%",
+        "sufficiency_at_10": "Suff@10%",
+        "sufficiency_at_20": "Suff@20%",
+        "sufficiency_gap_at_10": "Suff gap@10%",
+        "sufficiency_gap_at_20": "Suff gap@20%",
+        "comprehensiveness_at_10": "Comp@10%",
+        "comprehensiveness_at_20": "Comp@20%",
+        "sensitivity_n_corr": "Sensitivity-n corr",
+        "stability_top10_jaccard": "Top-10 stability",
     }
+    available_groups = [
+        (group_title, [(metric, higher) for metric, higher in metrics if metric in auc_all.columns])
+        for group_title, metrics in metric_groups
+    ]
+    available_groups = [(title, metrics) for title, metrics in available_groups if metrics]
+    if not available_groups:
+        return None
 
-    n_cols = 4
-    n_rows = int(np.ceil(len(metric_columns) / n_cols))
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4.6 * n_cols, 3.5 * n_rows), squeeze=False)
+    n_rows = len(available_groups)
+    n_cols = max(len(metrics) for _, metrics in available_groups)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4.8 * n_cols, 3.35 * n_rows), squeeze=False)
 
-    for ax, metric in zip(axes.flat, metric_columns):
-        values, labels = [], []
-        for method in methods:
-            method_values = pd.to_numeric(
-                auc_all.loc[auc_all["method"].astype(str) == method, metric],
-                errors="coerce",
-            ).dropna().values
-            if len(method_values) > 0:
-                values.append(method_values)
-                labels.append(method)
+    for row_idx, (group_title, metrics) in enumerate(available_groups):
+        for col_idx in range(n_cols):
+            ax = axes[row_idx, col_idx]
+            if col_idx >= len(metrics):
+                ax.axis("off")
+                continue
+            metric, higher_is_better = metrics[col_idx]
 
-        if values:
-            ax.boxplot(values, tick_labels=labels, showmeans=True, patch_artist=True)
-            ax.tick_params(axis="x", rotation=25)
-        else:
-            ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
-            ax.set_xticks([])
-        ax.set_title(metric_titles.get(metric, metric))
-        ax.grid(axis="y", alpha=0.25)
+            values, labels = [], []
+            for method in methods:
+                method_values = pd.to_numeric(
+                    auc_all.loc[auc_all["method"].astype(str) == method, metric],
+                    errors="coerce",
+                ).dropna().values
+                if len(method_values) > 0:
+                    values.append(method_values)
+                    labels.append(method)
 
-    for ax in axes.flat[len(metric_columns):]:
-        ax.axis("off")
+            if values:
+                medians = np.array([np.nanmedian(v) for v in values], dtype=float)
+                best_idx = int(np.nanargmax(medians) if higher_is_better else np.nanargmin(medians))
+                worst_idx = int(np.nanargmin(medians) if higher_is_better else np.nanargmax(medians))
+                box = ax.boxplot(values, tick_labels=labels, showmeans=True, patch_artist=True)
+                for idx, patch in enumerate(box["boxes"]):
+                    if idx == best_idx:
+                        patch.set_facecolor("#b7e4c7")
+                        patch.set_edgecolor("#0b6b38")
+                        patch.set_linewidth(2.4)
+                    elif idx == worst_idx:
+                        patch.set_facecolor("#ffc9c9")
+                        patch.set_edgecolor("#9d0208")
+                        patch.set_linewidth(2.4)
+                    else:
+                        patch.set_facecolor("#d7e8ff")
+                        patch.set_edgecolor("#4a6fa5")
+                        patch.set_alpha(0.8)
+                ax.tick_params(axis="x", rotation=25)
+                direction = "higher better" if higher_is_better else "lower better"
+                ax.text(
+                    0.02,
+                    0.98,
+                    f"Best: {labels[best_idx]}\nWorst: {labels[worst_idx]}",
+                    ha="left",
+                    va="top",
+                    transform=ax.transAxes,
+                    fontsize=8,
+                    bbox=dict(facecolor="white", edgecolor="lightgrey", alpha=0.9),
+                )
+            else:
+                ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+                ax.set_xticks([])
+                direction = ""
+            ax.set_title(f"{metric_titles.get(metric, metric)}\n{direction}")
+            ax.grid(axis="y", alpha=0.25)
+            if col_idx == 0:
+                ax.set_ylabel(group_title, fontsize=11, fontweight="bold")
 
     plt.suptitle(f"No-Ground-Truth Faithfulness Metrics Across {no_images} Images & Budget: {max_evals}", fontsize=16)
     plt.tight_layout()
@@ -698,7 +778,7 @@ def aggregate_auc_outputs(auc_all_df: pd.DataFrame, partition_summary_df: pd.Dat
     auc_all.to_csv(auc_all_path, index=False)
     summary.to_csv(auc_summary_path, index=False)
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4), sharey=False)
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4), sharey=False)
     methods = [m for m in METHOD_ORDER if m in set(auc_all["method"].dropna().astype(str))]
     for ax, metric, title, ylabel in [
         (axes[0], "auc_ins", "$\\mathit{AUC}^{+}$ across images", "Higher is better"),
@@ -711,22 +791,7 @@ def aggregate_auc_outputs(auc_all_df: pd.DataFrame, partition_summary_df: pd.Dat
         ax.grid(axis="y", alpha=0.25)
         ax.tick_params(axis="x", rotation=25)
 
-    partition_time_cols = [
-        ("time_sam", "SAM"),
-        ("time_coverage", "Coverage"),
-        ("time_compact", "Compact"),
-        ("time_filler", "Filler"),
-        ("time_refined", "Refined"),
-    ]
-    partition_time_cols = [(col, label) for col, label in partition_time_cols if col in partition_summary_df.columns]
-    values = [partition_summary_df[col].dropna().astype(float).values for col, _ in partition_time_cols]
-    labels = [label for _, label in partition_time_cols]
-    axes[2].boxplot(values, tick_labels=labels, showmeans=True, patch_artist=True)
-    axes[2].set_title("Time comparison for Partition only")
-    axes[2].set_ylabel("Seconds (lower is better)")
-    axes[2].grid(axis="y", alpha=0.25)
-    axes[2].tick_params(axis="x", rotation=25)
-    plt.suptitle(f"Aggregate AUC and Partition Time Across {no_images} Images & Budget: {max_evals}", fontsize=16)
+    plt.suptitle(f"Aggregate AUC Across {no_images} Images & Budget: {max_evals}", fontsize=16)
     plt.tight_layout()
     plt.savefig(box_plot_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -746,16 +811,7 @@ def save_time_comparison_outputs(auc_all_df: pd.DataFrame, partition_summary_df:
     time_auc_df = time_auc_df.sort_values(["method", "image_no"]).reset_index(drop=True)
     methods = [method for method in METHOD_ORDER if method in set(time_auc_df["method"].dropna().astype(str))]
 
-    partition_time_cols = [
-        ("time_sam", "SAM"),
-        ("time_coverage", "Coverage"),
-        ("time_compact", "Compact"),
-        ("time_filler", "Filler"),
-        ("time_refined", "Refined"),
-    ]
-    partition_time_cols = [(col, label) for col, label in partition_time_cols if col in partition_summary_df.columns]
-    partition_values = [partition_summary_df[col].dropna().astype(float).values for col, _ in partition_time_cols]
-    partition_labels = [label for _, label in partition_time_cols]
+    partition_values, partition_labels = partition_time_values_by_method(partition_summary_df, methods)
     exp_values = [
         time_auc_df.loc[time_auc_df["method"].astype(str) == method, "time_exp"].dropna().astype(float).values
         for method in methods
@@ -765,14 +821,21 @@ def save_time_comparison_outputs(auc_all_df: pd.DataFrame, partition_summary_df:
         for method in methods
     ]
 
-    partition_time_summary = (
-        partition_summary_df[[col for col, _ in partition_time_cols]]
-        .agg(["count", "mean", "std", "median", "min", "max"])
-        .T.reset_index()
-        .rename(columns={"index": "time_name"})
+    partition_time_summary = pd.DataFrame(
+        [
+            {
+                "time_name": label,
+                "count": len(values),
+                "mean": float(np.mean(values)) if len(values) else np.nan,
+                "std": float(np.std(values, ddof=1)) if len(values) > 1 else np.nan,
+                "median": float(np.median(values)) if len(values) else np.nan,
+                "min": float(np.min(values)) if len(values) else np.nan,
+                "max": float(np.max(values)) if len(values) else np.nan,
+            }
+            for values, label in zip(partition_values, partition_labels)
+        ]
     )
     partition_time_summary["group"] = "partition"
-    partition_time_summary["time_name"] = partition_time_summary["time_name"].map(dict(partition_time_cols))
     explanation_time_summary = (
         time_auc_df.groupby("method", observed=True)
         .agg(
@@ -790,8 +853,12 @@ def save_time_comparison_outputs(auc_all_df: pd.DataFrame, partition_summary_df:
     explanation_time_summary.to_csv(time_summary_path.with_name(time_summary_path.stem + "_explanation.csv"), index=False)
 
     fig, axes = plt.subplots(1, 3, figsize=(17, 4), sharey=False)
-    axes[0].boxplot(partition_values, tick_labels=partition_labels, showmeans=True, patch_artist=True)
-    axes[0].set_title("Partition time only")
+    if partition_values:
+        axes[0].boxplot(partition_values, tick_labels=partition_labels, showmeans=True, patch_artist=True)
+    else:
+        axes[0].text(0.5, 0.5, "No partition time data", ha="center", va="center", transform=axes[0].transAxes)
+        axes[0].set_xticks([])
+    axes[0].set_title("Partition time including SAM base")
     axes[1].boxplot(exp_values, tick_labels=methods, showmeans=True, patch_artist=True)
     axes[1].set_title("Explanation compute time")
     axes[2].boxplot(eval_values, tick_labels=methods, showmeans=True, patch_artist=True)
@@ -813,8 +880,9 @@ def save_total_time_outputs(auc_all_df: pd.DataFrame, partition_summary_df: pd.D
     plot_path = path_results / f"total_time_by_method_{max_evals}_{no_images}.png"
     auc_df = auc_all_df.copy()
     auc_df["image_id_str"] = auc_df["image_id"].apply(normalize_image_id)
-    partition_summary_df = partition_summary_df.copy()
-    partition_summary_df["image_id_str"] = partition_summary_df["image_id"].apply(normalize_image_id)
+    partition_summary_df = cumulative_partition_time_frame(partition_summary_df)
+    if "image_id_str" not in partition_summary_df.columns:
+        partition_summary_df["image_id_str"] = []
     auc_df["method"] = pd.Categorical(auc_df["method"], categories=METHOD_ORDER, ordered=True)
 
     rows = []
@@ -822,7 +890,7 @@ def save_total_time_outputs(auc_all_df: pd.DataFrame, partition_summary_df: pd.D
         method_df = auc_df[auc_df["method"].astype(str) == method].copy()
         if method_df.empty:
             continue
-        partition_col = PARTITION_TIME_BY_METHOD.get(method)
+        partition_col = f"partition_time_{method}"
         method_df["partition_time_sec"] = 0.0
         if partition_col is not None and partition_col in partition_summary_df.columns:
             method_df = method_df.merge(partition_summary_df[["image_id_str", partition_col]], on="image_id_str", how="left")
