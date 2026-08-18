@@ -120,15 +120,26 @@ def predict_detr_batch(model, processor, device: torch.device, images, batch_siz
 
     outputs_all = []
     num_classes = len(model.config.id2label)
+    effective_batch_size = max(1, int(batch_size))
     with torch.no_grad():
-        for start in range(0, len(images), batch_size):
-            batch_images = images[start : start + batch_size]
-            inputs = processor(images=batch_images, return_tensors="pt")
-            inputs = {key: value.to(device) for key, value in inputs.items()}
-            outputs = model(**inputs)
-            target_sizes = torch.tensor([image.size[::-1] for image in batch_images], device=device)
-            results = processor.post_process_object_detection(outputs, threshold=threshold, target_sizes=target_sizes)
-            outputs_all.extend(detr_result_to_scores(result, num_classes, aggregate=aggregate) for result in results)
+        start = 0
+        while start < len(images):
+            batch_images = images[start : start + effective_batch_size]
+            try:
+                inputs = processor(images=batch_images, return_tensors="pt")
+                inputs = {key: value.to(device) for key, value in inputs.items()}
+                outputs = model(**inputs)
+                target_sizes = torch.tensor([image.size[::-1] for image in batch_images], device=device)
+                results = processor.post_process_object_detection(outputs, threshold=threshold, target_sizes=target_sizes)
+                outputs_all.extend(detr_result_to_scores(result, num_classes, aggregate=aggregate) for result in results)
+                start += len(batch_images)
+            except torch.cuda.OutOfMemoryError:
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+                if effective_batch_size <= 1:
+                    raise
+                effective_batch_size = max(1, effective_batch_size // 2)
+                print(f"DETR CUDA OOM; retrying with detr_batch_size={effective_batch_size}")
     return np.stack(outputs_all, axis=0)
 
 
@@ -653,7 +664,7 @@ def parse_args():
     parser.add_argument("--num-explained-classes", type=int, default=4)
     parser.add_argument("--eval-batch-size", type=int, default=128)
     parser.add_argument("--auc-batch-size", type=int, default=64)
-    parser.add_argument("--detr-batch-size", type=int, default=32)
+    parser.add_argument("--detr-batch-size", type=int, default=8, help="Internal DETR forward batch size. Large values can OOM; the runner retries smaller on CUDA OOM.")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--verbose-level", default="low", choices=["low", "medium", "high"])

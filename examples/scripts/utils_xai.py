@@ -829,9 +829,10 @@ def saliency_to_auc(nu, heatmap, f_S, f_0, predicted_cls, batch_size=4, method='
         y_adjusted = f_0 - y_adjusted
 
     # rescaling
-    ys_rescaled = ys / abs(f_S - f_0)
-    y_clipped_rescaled = y_clipped / abs(f_S - f_0)
-    y_adjusted_rescaled = y_adjusted / abs(f_S - f_0)
+    score_delta_denominator = max(abs(f_S - f_0), 1e-12)
+    ys_rescaled = ys / score_delta_denominator
+    y_clipped_rescaled = y_clipped / score_delta_denominator
+    y_adjusted_rescaled = y_adjusted / score_delta_denominator
 
     auc, auc_r, auc_mae, auc_mse, auc_adj, auc_adjr, auc_clip, auc_clipr = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
@@ -872,6 +873,7 @@ def saliency_to_auc(nu, heatmap, f_S, f_0, predicted_cls, batch_size=4, method='
 
     return {'xs':xs, 'ms':ms, 'qs':qs, 
             'f_0':f_0, 'f_S':f_S, 'flipped':flipped, 
+            'score_delta_denominator':score_delta_denominator,
             'ys':ys, 'ysr':ys_rescaled,
             'y_clip':y_clipped, 'y_clipr':y_clipped_rescaled, 
             'y_adj':y_adjusted, 'y_adjr':y_adjusted_rescaled, 
