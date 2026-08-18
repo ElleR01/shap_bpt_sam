@@ -27,8 +27,8 @@ evaluation:
   limit: 2
   bg-type: "noise"
   max-evals: 1000
-  eval-batch-size: 128
-  auc-batch-size: 64
+  eval-batch-size: 2048
+  auc-batch-size: 1024
   # Options:
   #   black   : black background
   #   gray    : gray background
