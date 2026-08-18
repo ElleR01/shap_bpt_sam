@@ -633,7 +633,7 @@ def parse_args():
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--verbose-level", default="low", choices=["low", "medium", "high"])
-    parser.add_argument("--verbose-k", type=int, default=10, help="Print medium/high resource summary every K images after image 1.")
+    parser.add_argument("--verbose-k", type=int, default=20, help="Print medium/high resource summary every K images after image 1.")
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--no-auc", dest="compute_auc", action="store_false")
     parser.add_argument("--no-plots", dest="save_plots", action="store_false")

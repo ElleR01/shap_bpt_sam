@@ -124,6 +124,17 @@ Default result folder for `noise`:
 resnet_xai_results_E2_1
 ```
 
+```bash
+python examples/scripts/run_resnet_full.py \
+  --config MSCOCO_epito \
+  --verbose-level medium \
+  --bg-type noise \
+  --eval-batch-size 1024 \
+  --auc-batch-size 512 \
+  --resnet-batch-size 1024
+```
+
+
 ## E3: ViT-B/16 Classification
 
 Use this to compare a transformer classifier against ResNet-50. The score vector
@@ -146,6 +157,16 @@ Default result folder for `noise`:
 
 ```text
 xai_results_E3_1
+```
+
+```bash
+python examples/scripts/run_vit_full.py \
+  --config MSCOCO_epito \
+  --verbose-level medium \
+  --bg-type noise \
+  --eval-batch-size 1024 \
+  --auc-batch-size 512 \
+  --vit-batch-size 1024
 ```
 
 ## E4: DETR Detection
@@ -184,6 +205,19 @@ Default result folder for `noise`:
 ```text
 xai_results_E4_1
 ```
+
+```bash
+python examples/scripts/run_detr_full.py \
+  --config MSCOCO_epito \
+  --max-evals 500 \
+  --verbose-level medium \
+  --bg-type noise \
+  --threshold 0.3 \
+  --detr-batch-size 128 \
+  --eval-batch-size 64 \
+  --auc-batch-size 64
+```
+
 
 ## Running Background Ablations
 
@@ -247,3 +281,10 @@ Then add the background ablation for YOLOv11:
 ```text
 E1_1, E1_2, E1_3, E1_4, E1_5
 ```
+
+## RUN EXPs
+
+```bash
+./examples/scripts/prepare_setup.sh
+```
+
