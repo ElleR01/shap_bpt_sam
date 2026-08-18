@@ -132,9 +132,9 @@ Run each background replacement by changing `--bg-type`.
 for bg in noise blurred black white full; do
   python examples/scripts/run_yolo_full.py \
     --config MSCOCO_epito \
-    --limit 2 \
     --eval-batch-size 2048 \
     --auc-batch-size 1024 \
+    --max-evals 100 \
     --bg-type "$bg" \
     --verbose-level low
 done
@@ -155,7 +155,7 @@ for budget in 50 100 250 500 1000; do
     --eval-batch-size 2048 \
     --auc-batch-size 1024 \
     --max-evals "$budget" \
-    --verbose-level low
+    --verbose-level medium
 done
 ```
 
@@ -204,9 +204,9 @@ python examples/scripts/run_resnet_full.py \
   --config MSCOCO_epito \
   --verbose-level medium \
   --bg-type noise \
-  --eval-batch-size 1024 \
-  --auc-batch-size 512 \
-  --resnet-batch-size 1024
+  --eval-batch-size 2048 \
+  --auc-batch-size 1024 \
+  --resnet-batch-size 2048
 ```
 
 ## E3: ViT-B/16 Classification
@@ -238,9 +238,9 @@ python examples/scripts/run_vit_full.py \
   --config MSCOCO_epito \
   --verbose-level medium \
   --bg-type noise \
-  --eval-batch-size 1024 \
-  --auc-batch-size 512 \
-  --vit-batch-size 1024
+  --eval-batch-size 2048 \
+  --auc-batch-size 1024 \
+  --vit-batch-size 2048
 ```
 
 ## E4: DETR Detection
@@ -287,7 +287,7 @@ python examples/scripts/run_detr_full.py \
   --verbose-level medium \
   --bg-type noise \
   --threshold 0.3 \
-  --detr-batch-size 128 \
+  --detr-batch-size 64 \
   --eval-batch-size 64 \
   --auc-batch-size 64
 ```
@@ -355,4 +355,18 @@ E1_1_1, E1_1_2, E1_1_3, E1_1_4, E1_1_5
 
 ```bash
 ./examples/scripts/prepare_setup.sh
+```
+
+
+```bash
+python examples/scripts/compare_experiments.py \
+  --results-root /beegfs/home/mrashid/repos/XAI/shap_bpt_sam/examples/results \
+  --experiments xai_results_E1_1_2 xai_results_E1_2_2 xai_results_E2_1 xai_results_E3_1 xai_results_E4_1 \
+  --output-dir /beegfs/home/mrashid/repos/XAI/shap_bpt_sam/examples/results/overall_comparison
+
+
+python examples/scripts/compare_experiments.py \
+  --results-dirs /path/xai_results_E1_1_2 /path/xai_results_E3_1
+
+
 ```
