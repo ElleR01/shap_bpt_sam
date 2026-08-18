@@ -57,14 +57,14 @@ These suffixes are appended only for YOLOv11 runs by default.
 
 Examples:
 
-| Exp No | Model     | Background Replacement Values | Task           |
-| :----: | :-------- | :---------------------------- | :------------- |
-| `E1_1_1` | YOLOv11 | `noise`, `max_evals=50`       | Detection      |
-| `E1_1_4` | YOLOv11 | `noise`, `max_evals=500`      | Detection      |
-| `E1_5_4` | YOLOv11 | `full`, `max_evals=500`       | Detection      |
-| `E2_1` | ResNet-50 | `noise`                       | Classification |
-| `E3_1` | ViT-B/16  | `noise`                       | Classification |
-| `E4_1` | DETR      | `noise`                       | Detection      |
+|  Exp No  | Model     | Background Replacement Values | Task           |
+| :------: | :-------- | :---------------------------- | :------------- |
+| `E1_1_1` | YOLOv11   | `noise`, `max_evals=50`       | Detection      |
+| `E1_1_4` | YOLOv11   | `noise`, `max_evals=500`      | Detection      |
+| `E1_5_4` | YOLOv11   | `full`, `max_evals=500`       | Detection      |
+|  `E2_1`  | ResNet-50 | `noise`                       | Classification |
+|  `E3_1`  | ViT-B/16  | `noise`                       | Classification |
+|  `E4_1`  | DETR      | `noise`                       | Detection      |
 
 ## Partition / Explanation Methods
 
@@ -122,6 +122,25 @@ Default result folder for `noise` and `max_evals=500`:
 xai_results_E1_1_4
 ```
 
+## Running Background Ablations
+
+Run each background replacement by changing `--bg-type`.
+
+```bash
+for bg in noise blurred black white full; do
+  python examples/scripts/run_yolo_full.py \
+    --config MSCOCO_epito \
+    --limit 2 \
+    --eval-batch-size 2048 \
+    --auc-batch-size 1024 \
+    --bg-type "$bg" \
+    --verbose-level low
+done
+```
+
+<!-- The scripts automatically append the experiment suffix unless disabled with: -->
+<!-- You can also override the experiment ID manually: -->
+
 Run a YOLO budget ablation with fixed background:
 
 ```bash
@@ -129,9 +148,12 @@ for budget in 50 100 250 500 1000; do
   python examples/scripts/run_yolo_full.py \
     --config MSCOCO_epito \
     --model yolo11s \
+    --limit 2 \
     --bg-type noise \
+    --eval-batch-size 2048 \
+    --auc-batch-size 1024 \
     --max-evals "$budget" \
-    --verbose-level medium
+    --verbose-level low
 done
 ```
 
@@ -184,7 +206,6 @@ python examples/scripts/run_resnet_full.py \
   --auc-batch-size 512 \
   --resnet-batch-size 1024
 ```
-
 
 ## E3: ViT-B/16 Classification
 
@@ -269,32 +290,6 @@ python examples/scripts/run_detr_full.py \
   --auc-batch-size 64
 ```
 
-
-## Running Background Ablations
-
-Run each background replacement by changing `--bg-type`.
-
-```bash
-for bg in noise blurred black white full; do
-  python examples/scripts/run_yolo_full.py \
-    --config MSCOCO_epito \
-    --bg-type "$bg" \
-    --verbose-level medium
-done
-```
-
-The scripts automatically append the experiment suffix unless disabled with:
-
-```bash
---no-exp-suffix
-```
-
-You can also override the experiment ID manually:
-
-```bash
---exp-no E1_1_4
-```
-
 ## Summarizing Results
 
 Generate boxplots, the full HTML report, and the outlier report from saved
@@ -321,26 +316,26 @@ This file is updated after every completed image.
 The aggregate AUC CSV also includes model-faithfulness metrics that do not use
 segmentation ground truth:
 
-| Metric | Meaning |
-| :----- | :------ |
-| `drop_at_10/20/30` | Normalized confidence drop after removing the top attributed pixels. Higher is better. |
-| `insert_at_10/20/30` | Normalized confidence recovered by inserting only the top attributed pixels into the background. Higher is better. |
-| `sufficiency_at_10/20` | Model confidence when only the top attributed pixels are kept. Higher is better. |
-| `sufficiency_gap_at_10/20` | `f_S - sufficiency_at_k`. Lower is better. |
-| `comprehensiveness_at_10/20` | `f_S - score_after_removing_top_k`. Higher is better. |
-| `sensitivity_n_corr` | Correlation between attribution mass removed and actual model confidence drop over random masks. Higher is better. |
-| `stability_top10_jaccard` | Top-10% attribution rank stability under small attribution perturbations. Higher is better. |
+| Metric                       | Meaning                                                                                                            |
+| :--------------------------- | :----------------------------------------------------------------------------------------------------------------- |
+| `drop_at_10/20/30`           | Normalized confidence drop after removing the top attributed pixels. Higher is better.                             |
+| `insert_at_10/20/30`         | Normalized confidence recovered by inserting only the top attributed pixels into the background. Higher is better. |
+| `sufficiency_at_10/20`       | Model confidence when only the top attributed pixels are kept. Higher is better.                                   |
+| `sufficiency_gap_at_10/20`   | `f_S - sufficiency_at_k`. Lower is better.                                                                         |
+| `comprehensiveness_at_10/20` | `f_S - score_after_removing_top_k`. Higher is better.                                                              |
+| `sensitivity_n_corr`         | Correlation between attribution mass removed and actual model confidence drop over random masks. Higher is better. |
+| `stability_top10_jaccard`    | Top-10% attribution rank stability under small attribution perturbations. Higher is better.                        |
 
 ## Recommended Core Matrix
 
 At minimum, run the following for the main comparison:
 
-| Exp No | Model     | Task           | Background |
-| :----: | :-------- | :------------- | :--------- |
-| `E1_1_4` | YOLOv11 | Detection      | `noise`    |
-| `E2_1` | ResNet-50 | Classification | `noise`    |
-| `E3_1` | ViT-B/16  | Classification | `noise`    |
-| `E4_1` | DETR      | Detection      | `noise`    |
+|  Exp No  | Model     | Task           | Background |
+| :------: | :-------- | :------------- | :--------- |
+| `E1_1_4` | YOLOv11   | Detection      | `noise`    |
+|  `E2_1`  | ResNet-50 | Classification | `noise`    |
+|  `E3_1`  | ViT-B/16  | Classification | `noise`    |
+|  `E4_1`  | DETR      | Detection      | `noise`    |
 
 Then add the background ablation for YOLOv11:
 
