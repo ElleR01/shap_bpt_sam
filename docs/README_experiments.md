@@ -357,12 +357,11 @@ E1_1_1, E1_1_2, E1_1_3, E1_1_4, E1_1_5
 ./examples/scripts/prepare_setup.sh
 ```
 
-
 ```bash
 python examples/scripts/compare_experiments.py \
-  --results-root /beegfs/home/mrashid/repos/XAI/shap_bpt_sam/examples/results \
+  --results-root /Users/rashid/data/PhD/datacloud_data/repos/XAI/ShapBPT-SAM/shap_bpt_sam/examples/results \
   --experiments xai_results_E1_1_2 xai_results_E1_2_2 xai_results_E2_1 xai_results_E3_1 xai_results_E4_1 \
-  --output-dir /beegfs/home/mrashid/repos/XAI/shap_bpt_sam/examples/results/overall_comparison
+  --output-dir /Users/rashid/data/PhD/datacloud_data/repos/XAI/ShapBPT-SAM/shap_bpt_sam/examples/results/overall_comparison
 
 
 python examples/scripts/compare_experiments.py \
