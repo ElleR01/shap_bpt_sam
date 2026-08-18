@@ -63,8 +63,11 @@ def load_detr_model(model_name: str, device: torch.device):
         from transformers import DetrForObjectDetection, DetrImageProcessor
     except ImportError as exc:
         raise ImportError(
-            "DETR runner requires transformers. Install it with `pip install transformers` "
-            "or load the dependency on the Epito environment before running."
+            "DETR runner requires a working transformers installation. "
+            "The import failed while loading transformers or one of its dependencies. "
+            f"Original error: {exc}. "
+            "On Epito, try reinstalling the dependency stack in the active environment, e.g. "
+            "`python -m pip install --force-reinstall regex transformers`."
         ) from exc
 
     processor = DetrImageProcessor.from_pretrained(model_name)
