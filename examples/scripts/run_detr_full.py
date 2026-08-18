@@ -516,7 +516,7 @@ def run(args):
             for method in methods_iter:
                 if method_progress:
                     methods_iter.set_postfix_str(method)
-                    tqdm.write(f"{image_id}: starting {method}")
+                    # tqdm.write(f"{image_id}: starting {method}")
                 if method == "BPT":
                     bptree = None
                 else:
