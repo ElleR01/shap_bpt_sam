@@ -4,6 +4,7 @@ import html
 import json
 import os
 import re
+import zlib
 from time import time
 
 import cv2
@@ -1444,6 +1445,137 @@ def _auc_heatmap(exp_data, auc_class_index=0):
     return heatmap.astype(float, copy=False)
 
 import time
+def _safe_score_delta_denominator(f_S, f_0):
+    denom = abs(float(f_S) - float(f_0))
+    return denom if denom > 1e-12 else 1.0
+
+
+def _top_fraction_mask(heatmap, fraction):
+    values = np.asarray(heatmap, dtype=float)
+    finite = np.isfinite(values)
+    if not np.any(finite):
+        return np.zeros(values.shape, dtype=bool)
+
+    scores = np.full(values.shape, -np.inf, dtype=float)
+    scores[finite] = values[finite]
+    n_pixels = int(np.ceil(float(fraction) * scores.size))
+    n_pixels = max(1, min(scores.size, n_pixels))
+    flat = scores.ravel()
+    if n_pixels >= flat.size:
+        top_idx = np.arange(flat.size)
+    else:
+        top_idx = np.argpartition(flat, -n_pixels)[-n_pixels:]
+    mask = np.zeros(flat.shape, dtype=bool)
+    mask[top_idx] = True
+    return mask.reshape(scores.shape)
+
+
+def _batched_class_scores(nu, masks, predicted_cls, batch_size):
+    masks = list(masks)
+    scores = []
+    for start in range(0, len(masks), batch_size):
+        batch = np.asarray(masks[start:start + batch_size], dtype=bool)
+        preds = nu(batch)
+        scores.extend(np.asarray(preds)[:, predicted_cls].astype(float))
+    return np.asarray(scores, dtype=float)
+
+
+def _pearson_corr(x, y):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    keep = np.isfinite(x) & np.isfinite(y)
+    if keep.sum() < 2:
+        return np.nan
+    x = x[keep]
+    y = y[keep]
+    if np.std(x) <= 1e-12 or np.std(y) <= 1e-12:
+        return np.nan
+    return float(np.corrcoef(x, y)[0, 1])
+
+
+def _rank_stability_score(heatmap, fraction=0.1, noise_scale=0.01, repeats=10, seed=0):
+    values = np.asarray(heatmap, dtype=float)
+    base = _top_fraction_mask(values, fraction)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return np.nan
+    scale = np.nanstd(finite)
+    if scale <= 1e-12:
+        scale = max(float(np.nanmax(np.abs(finite))), 1.0)
+    rng = np.random.default_rng(seed)
+    overlaps = []
+    for _ in range(repeats):
+        perturbed = values + rng.normal(0.0, noise_scale * scale, size=values.shape)
+        other = _top_fraction_mask(perturbed, fraction)
+        union = np.logical_or(base, other).sum()
+        overlaps.append(np.logical_and(base, other).sum() / union if union else np.nan)
+    return float(np.nanmean(overlaps))
+
+
+def compute_extra_faithfulness_metrics(
+    nu,
+    heatmap,
+    f_S,
+    f_0,
+    predicted_cls,
+    batch_size=4,
+    fractions=(0.10, 0.20, 0.30),
+    sufficiency_fractions=(0.10, 0.20),
+    sensitivity_samples=20,
+    sensitivity_seed=0,
+):
+    """Compute no-ground-truth model faithfulness metrics for one attribution map."""
+    heatmap = np.asarray(heatmap, dtype=float)
+    denom = _safe_score_delta_denominator(f_S, f_0)
+    all_true = np.ones(heatmap.shape, dtype=bool)
+    masks, names = [], []
+
+    for fraction in fractions:
+        top_mask = _top_fraction_mask(heatmap, fraction)
+        masks.extend([np.logical_and(all_true, ~top_mask), top_mask])
+        pct = int(round(fraction * 100))
+        names.extend([f"drop_{pct}", f"insert_{pct}"])
+
+    for fraction in sufficiency_fractions:
+        top_mask = _top_fraction_mask(heatmap, fraction)
+        masks.extend([top_mask, np.logical_and(all_true, ~top_mask)])
+        pct = int(round(fraction * 100))
+        names.extend([f"suff_{pct}", f"comp_{pct}"])
+
+    scores = dict(zip(names, _batched_class_scores(nu, masks, predicted_cls, batch_size)))
+    metrics = {}
+
+    for fraction in fractions:
+        pct = int(round(fraction * 100))
+        y_drop = scores[f"drop_{pct}"]
+        y_insert = scores[f"insert_{pct}"]
+        metrics[f"drop_at_{pct}"] = float((float(f_S) - y_drop) / denom)
+        metrics[f"insert_at_{pct}"] = float((y_insert - float(f_0)) / denom)
+
+    for fraction in sufficiency_fractions:
+        pct = int(round(fraction * 100))
+        y_suff = scores[f"suff_{pct}"]
+        y_comp = scores[f"comp_{pct}"]
+        metrics[f"sufficiency_at_{pct}"] = float(y_suff)
+        metrics[f"sufficiency_gap_at_{pct}"] = float(float(f_S) - y_suff)
+        metrics[f"comprehensiveness_at_{pct}"] = float(float(f_S) - y_comp)
+
+    rng = np.random.default_rng(sensitivity_seed)
+    keep_masks = []
+    attr_removed = []
+    positive_heatmap = np.maximum(np.nan_to_num(heatmap, nan=0.0), 0.0)
+    for _ in range(sensitivity_samples):
+        remove_fraction = float(rng.uniform(0.05, 0.50))
+        remove_mask = rng.random(heatmap.shape) < remove_fraction
+        keep_masks.append(~remove_mask)
+        attr_removed.append(float(positive_heatmap[remove_mask].sum()))
+    sensitivity_scores = _batched_class_scores(nu, keep_masks, predicted_cls, batch_size)
+    actual_drop = float(f_S) - sensitivity_scores
+    metrics["sensitivity_n_corr"] = _pearson_corr(attr_removed, actual_drop)
+    metrics["stability_top10_jaccard"] = _rank_stability_score(heatmap, fraction=0.10, seed=sensitivity_seed)
+    return metrics
+
+
 def compute_auc_results(shap_values, nu, f_S, f_0, predicted_cls, batch_size=4,
                         auc_class_index=0, verbose=False):
     auc_results = []
@@ -1454,6 +1586,15 @@ def compute_auc_results(shap_values, nu, f_S, f_0, predicted_cls, batch_size=4,
 
         auc_del = utx.saliency_to_auc(nu, heatmap, f_S, f_0, predicted_cls, batch_size=batch_size, method='del')
         auc_ins = utx.saliency_to_auc(nu, heatmap, f_S, f_0, predicted_cls, batch_size=batch_size, method='ins')
+        extra_metrics = compute_extra_faithfulness_metrics(
+            nu,
+            heatmap,
+            f_S,
+            f_0,
+            predicted_cls,
+            batch_size=batch_size,
+            sensitivity_seed=zlib.crc32(str(exp_code).encode("utf-8")),
+        )
         time_eval = time.time() - time_start
 
         result = {
@@ -1461,6 +1602,7 @@ def compute_auc_results(shap_values, nu, f_S, f_0, predicted_cls, batch_size=4,
             'auc_del': auc_del,
             'auc_ins': auc_ins,
             'time_eval': time_eval,
+            **extra_metrics,
         }
         if isinstance(exp_data, dict):
             result.update({
@@ -1470,7 +1612,11 @@ def compute_auc_results(shap_values, nu, f_S, f_0, predicted_cls, batch_size=4,
 
         auc_results.append(result)
         if verbose:
-            print(f"{exp_code}: AUC-DEL={auc_del['auc_clipr']:.4f}, AUC-INS={auc_ins['auc_clipr']:.4f}")
+            print(
+                f"{exp_code}: AUC-DEL={auc_del['auc_clipr']:.4f}, "
+                f"AUC-INS={auc_ins['auc_clipr']:.4f}, "
+                f"Sens-n={result['sensitivity_n_corr']:.4f}"
+            )
 
     return auc_results
 
@@ -1531,9 +1677,17 @@ def plot_auc_results(auc_results,path_results_img, figsize=(11, 4), fill_alpha=0
 
 def auc_results_to_rows(auc_results, image_no=None, f_S=None, f_0=None,
                         image_id=None, fixed_category=None):
+    metric_keys = [
+        'drop_at_10', 'drop_at_20', 'drop_at_30',
+        'insert_at_10', 'insert_at_20', 'insert_at_30',
+        'sufficiency_at_10', 'sufficiency_at_20',
+        'sufficiency_gap_at_10', 'sufficiency_gap_at_20',
+        'comprehensiveness_at_10', 'comprehensiveness_at_20',
+        'sensitivity_n_corr', 'stability_top10_jaccard',
+    ]
     rows = []
     for result in auc_results:
-        rows.append({
+        row = {
             'image_no': int(image_no) if image_no is not None else None,
             'image_id': str(image_id) if image_id is not None else None,
             'fixed_category': fixed_category,
@@ -1544,9 +1698,10 @@ def auc_results_to_rows(auc_results, image_no=None, f_S=None, f_0=None,
             'auc_del': float(result['auc_del']['auc_clipr']),
             'time_exp': result['time_exp'],
             'time_eval': result['time_eval'],
-
-
-        })
+        }
+        for key in metric_keys:
+            row[key] = result.get(key, np.nan)
+        rows.append(row)
     return rows
 
 

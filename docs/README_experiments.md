@@ -316,6 +316,21 @@ auc_results_all_images_current_run.csv
 
 This file is updated after every completed image.
 
+## No-Ground-Truth Evaluation Metrics
+
+The aggregate AUC CSV also includes model-faithfulness metrics that do not use
+segmentation ground truth:
+
+| Metric | Meaning |
+| :----- | :------ |
+| `drop_at_10/20/30` | Normalized confidence drop after removing the top attributed pixels. Higher is better. |
+| `insert_at_10/20/30` | Normalized confidence recovered by inserting only the top attributed pixels into the background. Higher is better. |
+| `sufficiency_at_10/20` | Model confidence when only the top attributed pixels are kept. Higher is better. |
+| `sufficiency_gap_at_10/20` | `f_S - sufficiency_at_k`. Lower is better. |
+| `comprehensiveness_at_10/20` | `f_S - score_after_removing_top_k`. Higher is better. |
+| `sensitivity_n_corr` | Correlation between attribution mass removed and actual model confidence drop over random masks. Higher is better. |
+| `stability_top10_jaccard` | Top-10% attribution rank stability under small attribution perturbations. Higher is better. |
+
 ## Recommended Core Matrix
 
 At minimum, run the following for the main comparison:
@@ -344,4 +359,3 @@ E1_1_1, E1_1_2, E1_1_3, E1_1_4, E1_1_5
 ```bash
 ./examples/scripts/prepare_setup.sh
 ```
-

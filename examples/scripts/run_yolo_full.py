@@ -53,6 +53,22 @@ PARTITION_TIME_BY_METHOD = {
     "refined": "time_refined",
     "refined_filled": "time_refined_filled",
 }
+FAITHFULNESS_METRIC_COLUMNS = [
+    "drop_at_10",
+    "drop_at_20",
+    "drop_at_30",
+    "insert_at_10",
+    "insert_at_20",
+    "insert_at_30",
+    "sufficiency_at_10",
+    "sufficiency_at_20",
+    "sufficiency_gap_at_10",
+    "sufficiency_gap_at_20",
+    "comprehensiveness_at_10",
+    "comprehensiveness_at_20",
+    "sensitivity_n_corr",
+    "stability_top10_jaccard",
+]
 BACKGROUND_REPLACEMENT_DETAILS = {
     "noise": "Gaussian random background, blurred with sigma=2",
     "blurred": "Input image blurred with Gaussian sigma=8",
@@ -593,17 +609,24 @@ def aggregate_auc_outputs(auc_all_df: pd.DataFrame, partition_summary_df: pd.Dat
     auc_all = auc_all_df.copy()
     auc_all["method"] = pd.Categorical(auc_all["method"], categories=METHOD_ORDER, ordered=True)
     auc_all = auc_all.sort_values(["method", "image_no"]).reset_index(drop=True)
+    agg_spec = {
+        "images": ("image_no", "nunique"),
+        "auc_ins_mean": ("auc_ins", "mean"),
+        "auc_ins_std": ("auc_ins", "std"),
+        "auc_ins_median": ("auc_ins", "median"),
+        "auc_del_mean": ("auc_del", "mean"),
+        "auc_del_std": ("auc_del", "std"),
+        "auc_del_median": ("auc_del", "median"),
+    }
+    for metric in FAITHFULNESS_METRIC_COLUMNS:
+        if metric in auc_all.columns:
+            agg_spec[f"{metric}_mean"] = (metric, "mean")
+            agg_spec[f"{metric}_std"] = (metric, "std")
+            agg_spec[f"{metric}_median"] = (metric, "median")
+
     summary = (
         auc_all.groupby("method", observed=True)
-        .agg(
-            images=("image_no", "nunique"),
-            auc_ins_mean=("auc_ins", "mean"),
-            auc_ins_std=("auc_ins", "std"),
-            auc_ins_median=("auc_ins", "median"),
-            auc_del_mean=("auc_del", "mean"),
-            auc_del_std=("auc_del", "std"),
-            auc_del_median=("auc_del", "median"),
-        )
+        .agg(**agg_spec)
         .reset_index()
     )
 
@@ -620,7 +643,7 @@ def aggregate_auc_outputs(auc_all_df: pd.DataFrame, partition_summary_df: pd.Dat
         (axes[1], "auc_del", "$\\mathit{AUC}^{-}$ across images", "Lower is better"),
     ]:
         values = [auc_all.loc[auc_all["method"].astype(str) == method, metric].dropna().values for method in methods]
-        ax.boxplot(values, labels=methods, showmeans=True, patch_artist=True)
+        ax.boxplot(values, tick_labels=methods, showmeans=True, patch_artist=True)
         ax.set_title(title)
         ax.set_ylabel(ylabel)
         ax.grid(axis="y", alpha=0.25)
@@ -636,7 +659,7 @@ def aggregate_auc_outputs(auc_all_df: pd.DataFrame, partition_summary_df: pd.Dat
     partition_time_cols = [(col, label) for col, label in partition_time_cols if col in partition_summary_df.columns]
     values = [partition_summary_df[col].dropna().astype(float).values for col, _ in partition_time_cols]
     labels = [label for _, label in partition_time_cols]
-    axes[2].boxplot(values, labels=labels, showmeans=True, patch_artist=True)
+    axes[2].boxplot(values, tick_labels=labels, showmeans=True, patch_artist=True)
     axes[2].set_title("Time comparison for Partition only")
     axes[2].set_ylabel("Seconds (lower is better)")
     axes[2].grid(axis="y", alpha=0.25)
@@ -704,11 +727,11 @@ def save_time_comparison_outputs(auc_all_df: pd.DataFrame, partition_summary_df:
     explanation_time_summary.to_csv(time_summary_path.with_name(time_summary_path.stem + "_explanation.csv"), index=False)
 
     fig, axes = plt.subplots(1, 3, figsize=(17, 4), sharey=False)
-    axes[0].boxplot(partition_values, labels=partition_labels, showmeans=True, patch_artist=True)
+    axes[0].boxplot(partition_values, tick_labels=partition_labels, showmeans=True, patch_artist=True)
     axes[0].set_title("Partition time only")
-    axes[1].boxplot(exp_values, labels=methods, showmeans=True, patch_artist=True)
+    axes[1].boxplot(exp_values, tick_labels=methods, showmeans=True, patch_artist=True)
     axes[1].set_title("Explanation compute time")
-    axes[2].boxplot(eval_values, labels=methods, showmeans=True, patch_artist=True)
+    axes[2].boxplot(eval_values, tick_labels=methods, showmeans=True, patch_artist=True)
     axes[2].set_title("AUC evaluation time")
     for ax in axes:
         ax.set_ylabel("Seconds (lower is better)")
@@ -811,7 +834,7 @@ def build_xai_results_webpage(xai_results_root: Path):
     def fmt_table_value(value, column=None):
         if value is None or pd.isna(value):
             return ""
-        if column in {"auc_ins", "auc_del", "f_S", "f_0"}:
+        if column in {"auc_ins", "auc_del", "f_S", "f_0"} or column in FAITHFULNESS_METRIC_COLUMNS:
             return fmt_float(value, 4)
         if column in {"time_exp", "time_eval"}:
             return fmt_float(value, 2)
@@ -850,7 +873,8 @@ def build_xai_results_webpage(xai_results_root: Path):
             return '<p class="muted">No AUC rows found for this image.</p>'
         sub["method"] = pd.Categorical(sub["method"], categories=METHOD_ORDER, ordered=True)
         sub = sub.sort_values("method")
-        return dataframe_to_html_table(sub, ["method", "auc_ins", "auc_del", "time_exp", "time_eval"])
+        metric_columns = [col for col in FAITHFULNESS_METRIC_COLUMNS if col in sub.columns]
+        return dataframe_to_html_table(sub, ["method", "auc_ins", "auc_del", *metric_columns, "time_exp", "time_eval"])
 
     def top_classes_table(top_classes):
         if not top_classes:
@@ -941,7 +965,17 @@ def build_xai_results_webpage(xai_results_root: Path):
     if not items:
         raise FileNotFoundError(f"No per-image result images or *_predictions.json files found below: {xai_results_root}")
 
-    auc_columns = ["image_no", "image_id", "fixed_category", "method", "auc_ins", "auc_del", "time_exp", "time_eval"]
+    auc_columns = [
+        "image_no",
+        "image_id",
+        "fixed_category",
+        "method",
+        "auc_ins",
+        "auc_del",
+        *[col for col in FAITHFULNESS_METRIC_COLUMNS if col in auc_all_df.columns],
+        "time_exp",
+        "time_eval",
+    ]
     auc_top_html = f"""
 <section class="top-card">
   <h2>Aggregate AUC Results</h2>
