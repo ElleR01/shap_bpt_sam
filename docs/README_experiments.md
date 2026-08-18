@@ -14,7 +14,16 @@ Each full-run script saves:
 ## Experiment IDs
 
 The first part of the experiment ID identifies the model family. The suffix
-identifies the background replacement value.
+identifies the background replacement value. For YOLOv11 budget ablations, a
+second suffix identifies the explanation budget:
+
+```text
+E1_<background_id>_<budget_id>
+```
+
+For example, `E1_1_1` means YOLOv11 with `noise` background and
+`max_evals=50`; `E1_1_4` means YOLOv11 with `noise` background and
+`max_evals=500`.
 
 | Prefix | Task             | Model                            |                           Classes                           | Script                                |
 | :----: | :--------------- | :------------------------------- | :---------------------------------------------------------: | :------------------------------------ |
@@ -34,12 +43,25 @@ identifies the background replacement value.
 |  `_5`  | `full`                        | Average over black, gray, white, blurred, and noise backgrounds |
 |  `_6`  | `gray`                        | All pixels set to 127                                           |
 
+## YOLO Budget Ablation IDs
+
+These suffixes are appended only for YOLOv11 runs by default.
+
+| Suffix | `--max-evals` | Details                       |
+| :----: | ------------: | :---------------------------- |
+|  `_1`  |          `50` | Very low explanation budget   |
+|  `_2`  |         `100` | Low explanation budget        |
+|  `_3`  |         `250` | Medium-low explanation budget |
+|  `_4`  |         `500` | Default explanation budget    |
+|  `_5`  |        `1000` | High explanation budget       |
+
 Examples:
 
 | Exp No | Model     | Background Replacement Values | Task           |
 | :----: | :-------- | :---------------------------- | :------------- |
-| `E1_1` | YOLOv11   | `noise`                       | Detection      |
-| `E1_5` | YOLOv11   | `full`                        | Detection      |
+| `E1_1_1` | YOLOv11 | `noise`, `max_evals=50`       | Detection      |
+| `E1_1_4` | YOLOv11 | `noise`, `max_evals=500`      | Detection      |
+| `E1_5_4` | YOLOv11 | `full`, `max_evals=500`       | Detection      |
 | `E2_1` | ResNet-50 | `noise`                       | Classification |
 | `E3_1` | ViT-B/16  | `noise`                       | Classification |
 | `E4_1` | DETR      | `noise`                       | Detection      |
@@ -94,11 +116,40 @@ python examples/scripts/run_yolo_full.py \
   --class-aggregation sum
 ```
 
-Default result folder for `noise`:
+Default result folder for `noise` and `max_evals=500`:
 
 ```text
-xai_results_E1_1
+xai_results_E1_1_4
 ```
+
+Run a YOLO budget ablation with fixed background:
+
+```bash
+for budget in 50 100 250 500 1000; do
+  python examples/scripts/run_yolo_full.py \
+    --config MSCOCO_epito \
+    --model yolo11s \
+    --bg-type noise \
+    --max-evals "$budget" \
+    --verbose-level medium
+done
+```
+
+This creates:
+
+```text
+xai_results_E1_1_1
+xai_results_E1_1_2
+xai_results_E1_1_3
+xai_results_E1_1_4
+xai_results_E1_1_5
+```
+
+Use `--no-budget-suffix` to restore the older two-part YOLO folder name such as
+`xai_results_E1_1`.
+
+Nonstandard budgets use an explicit suffix, for example `--max-evals 750`
+creates `xai_results_E1_1_custom750`.
 
 ## E2: ResNet-50 Classification
 
@@ -241,7 +292,7 @@ The scripts automatically append the experiment suffix unless disabled with:
 You can also override the experiment ID manually:
 
 ```bash
---exp-no E1_1
+--exp-no E1_1_4
 ```
 
 ## Summarizing Results
@@ -271,7 +322,7 @@ At minimum, run the following for the main comparison:
 
 | Exp No | Model     | Task           | Background |
 | :----: | :-------- | :------------- | :--------- |
-| `E1_1` | YOLOv11   | Detection      | `noise`    |
+| `E1_1_4` | YOLOv11 | Detection      | `noise`    |
 | `E2_1` | ResNet-50 | Classification | `noise`    |
 | `E3_1` | ViT-B/16  | Classification | `noise`    |
 | `E4_1` | DETR      | Detection      | `noise`    |
@@ -279,7 +330,13 @@ At minimum, run the following for the main comparison:
 Then add the background ablation for YOLOv11:
 
 ```text
-E1_1, E1_2, E1_3, E1_4, E1_5
+E1_1_4, E1_2_4, E1_3_4, E1_4_4, E1_5_4
+```
+
+Then add the budget ablation for YOLOv11:
+
+```text
+E1_1_1, E1_1_2, E1_1_3, E1_1_4, E1_1_5
 ```
 
 ## RUN EXPs

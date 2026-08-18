@@ -69,6 +69,20 @@ BACKGROUND_EXP_INDEX = {
     "full": 5,
     "gray": 6,
 }
+BUDGET_EXP_INDEX = {
+    50: 1,
+    100: 2,
+    250: 3,
+    500: 4,
+    1000: 5,
+}
+BUDGET_EXP_DETAILS = {
+    50: "Very low explanation budget",
+    100: "Low explanation budget",
+    250: "Medium-low explanation budget",
+    500: "Default explanation budget",
+    1000: "High explanation budget",
+}
 MODEL_EXP_PREFIX = {
     "yolo": ("E1", "yolov11"),
     "yolov11": ("E1", "yolov11"),
@@ -94,18 +108,49 @@ def experiment_mapping_rows() -> list[dict]:
                     "Exp No": f"{prefix}_{index}",
                     "Model": model_name,
                     "Background Replacement Values": bg_type,
+                    "Budget": "-",
                     "Details": BACKGROUND_REPLACEMENT_DETAILS.get(bg_type, "-"),
+                }
+            )
+    for bg_type, bg_index in BACKGROUND_EXP_INDEX.items():
+        for budget, budget_index in BUDGET_EXP_INDEX.items():
+            rows.append(
+                {
+                    "Exp No": f"E1_{bg_index}_{budget_index}",
+                    "Model": "yolov11",
+                    "Background Replacement Values": bg_type,
+                    "Budget": budget,
+                    "Details": f"{BACKGROUND_REPLACEMENT_DETAILS.get(bg_type, '-')}; {BUDGET_EXP_DETAILS.get(budget, '-')}",
                 }
             )
     return rows
 
 
-def infer_experiment_no(model_group: str, bg_type: str, explicit_exp_no: str | None = None) -> str:
+def budget_exp_suffix(max_evals: int) -> str:
+    if max_evals in BUDGET_EXP_INDEX:
+        return str(BUDGET_EXP_INDEX[max_evals])
+    return f"custom{max_evals}"
+
+
+def budget_exp_index(max_evals: int) -> int | None:
+    return BUDGET_EXP_INDEX.get(max_evals)
+
+
+def infer_experiment_no(
+    model_group: str,
+    bg_type: str,
+    explicit_exp_no: str | None = None,
+    max_evals: int | None = None,
+    include_budget: bool = False,
+) -> str:
     if explicit_exp_no:
         return explicit_exp_no
     key = model_group.lower().replace("-", "").replace("/", "_")
     prefix = MODEL_EXP_PREFIX.get(key, ("E1", model_group))[0]
-    return f"{prefix}_{BACKGROUND_EXP_INDEX.get(bg_type, 0)}"
+    exp_no = f"{prefix}_{BACKGROUND_EXP_INDEX.get(bg_type, 0)}"
+    if include_budget and max_evals is not None:
+        exp_no = f"{exp_no}_{budget_exp_suffix(int(max_evals))}"
+    return exp_no
 
 
 def add_exp_suffix(results_name: str, exp_no: str | None) -> str:
@@ -1033,7 +1078,7 @@ def run(args):
 
     masks_base_path = Path(config["data"]["masks_path"]) / config["data"]["mask_dir"] / config["data"]["mask_dir_final"]
     image_dir = config["data"]["image_dir"]
-    exp_no = infer_experiment_no("yolov11", args.bg_type, args.exp_no)
+    exp_no = infer_experiment_no("yolov11", args.bg_type, args.exp_no, max_evals=args.max_evals, include_budget=args.budget_suffix)
     results_name = add_exp_suffix(args.results_name, exp_no if args.exp_suffix else None)
     path_results = Path(config["output"]["dir"]) / config["output"].get("folder", "") / results_name
     path_results.mkdir(parents=True, exist_ok=True)
@@ -1047,6 +1092,8 @@ def run(args):
             "num_model_classes": yolo_class_count(model),
             "background_replacement_values": args.bg_type,
             "background_details": BACKGROUND_REPLACEMENT_DETAILS.get(args.bg_type, "-"),
+            "budget_index": budget_exp_index(args.max_evals) if args.budget_suffix else None,
+            "budget_details": BUDGET_EXP_DETAILS.get(args.max_evals, "Custom explanation budget"),
             "class_aggregation": args.class_aggregation,
             "max_evals": args.max_evals,
             "eval_batch_size": args.eval_batch_size,
@@ -1342,8 +1389,9 @@ def parse_args():
     parser.add_argument("--device", default=None, choices=["auto", "cpu", "cuda", "mps"], help="Override config device.")
     parser.add_argument("--output-dir", default=None, help="Override config output.dir; xai_results is created inside it.")
     parser.add_argument("--results-name", default="xai_results", help="Base results folder name before experiment suffix.")
-    parser.add_argument("--exp-no", default=None, help="Override experiment number, e.g. E1_1.")
+    parser.add_argument("--exp-no", default=None, help="Override experiment number, e.g. E1_1_4.")
     parser.add_argument("--no-exp-suffix", dest="exp_suffix", action="store_false", help="Do not append experiment number to results folder.")
+    parser.add_argument("--no-budget-suffix", dest="budget_suffix", action="store_false", help="Use E1_background instead of E1_background_budget.")
     parser.add_argument("--max-evals", type=int, default=500)
     parser.add_argument("--limit", type=int, default=None, help="Limit number of images for a smoke test.")
     parser.add_argument("--image-ids", nargs="*", default=None, help="Optional explicit image ids.")
@@ -1359,7 +1407,7 @@ def parse_args():
     parser.add_argument("--no-auc", dest="compute_auc", action="store_false")
     parser.add_argument("--no-plots", dest="save_plots", action="store_false")
     parser.add_argument("--no-html", dest="build_html", action="store_false")
-    parser.set_defaults(compute_auc=True, save_plots=True, build_html=True, exp_suffix=True)
+    parser.set_defaults(compute_auc=True, save_plots=True, build_html=True, exp_suffix=True, budget_suffix=True)
     return parser.parse_args()
 
 
