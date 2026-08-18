@@ -66,6 +66,7 @@ examples/partitions_new_120
 ## Checkpoints for SAM
 examples/notebooks/checkpoints/
 examples/notebooks/checkpoints/yolo11s.pt
+checkpoints
 
 # Results
 examples/notebooks/results/
