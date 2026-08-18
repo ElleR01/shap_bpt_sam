@@ -69,6 +69,7 @@ examples/notebooks/checkpoints/yolo11s.pt
 checkpoints
 
 # Results
+examples/results/
 examples/notebooks/results/
 /examples/results/xai_results
 results.zip
