@@ -1292,8 +1292,11 @@ import utils_sam_2 as uts2
 shapley_values_colormap = utx.get_shapley_values_colormap()
 def plot_xai(input_data,partitions,shap_values, model, results, image_id,
               destroy_fig=False, save_path=None, save_fig=False):
-    fig, axes = plt.subplots(3, 3, figsize=(15, 10))
-    axes = axes.flatten()
+    n_panels = 3 + len(shap_values)
+    ncols = 3
+    nrows = int(np.ceil(n_panels / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 3.4 * nrows))
+    axes = np.atleast_1d(axes).flatten()
     axes[0].imshow(input_data['image_to_explain'])
     axes[0].set_title(f"Original Image - {image_id}")
     axes[0].axis('off')
@@ -1332,6 +1335,8 @@ def plot_xai(input_data,partitions,shap_values, model, results, image_id,
         axes[i + 3].set_title(f"{method} Explanation")
         # axes[i + 1].axis('off')
         axes[i + 3].set_xticks([]); axes[i + 3].set_yticks([])
+    for ax in axes[n_panels:]:
+        ax.axis('off')
     plt.tight_layout()
     if save_fig:
         # save_path = os.path.join(config['output']['dir'], config['output']['folder'], 'xai_results', str(int(input_data['fname'])))
