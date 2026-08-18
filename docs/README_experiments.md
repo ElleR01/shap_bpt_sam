@@ -100,6 +100,8 @@ python examples/scripts/run_yolo_full.py \
   --config MSCOCO_epito \
   --limit 2 \
   --max-evals 500 \
+  --eval-batch-size 2048 \
+  --auc-batch-size 1024 \
   --verbose-level medium \
   --model yolo11s \
   --bg-type noise \
