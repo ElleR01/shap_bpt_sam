@@ -604,6 +604,68 @@ def save_current_auc_table(auc_table_rows: list[dict], path_results: Path) -> tu
     return current_run_path, auc_all_df
 
 
+def save_faithfulness_metric_boxplots(auc_all: pd.DataFrame, path_results: Path, max_evals: int, no_images: int) -> Path | None:
+    metric_columns = [metric for metric in FAITHFULNESS_METRIC_COLUMNS if metric in auc_all.columns]
+    if not metric_columns:
+        return None
+
+    methods = [method for method in METHOD_ORDER if method in set(auc_all["method"].dropna().astype(str))]
+    if not methods:
+        return None
+
+    metric_titles = {
+        "drop_at_10": "Drop@10% (higher better)",
+        "drop_at_20": "Drop@20% (higher better)",
+        "drop_at_30": "Drop@30% (higher better)",
+        "insert_at_10": "Insert@10% (higher better)",
+        "insert_at_20": "Insert@20% (higher better)",
+        "insert_at_30": "Insert@30% (higher better)",
+        "sufficiency_at_10": "Sufficiency@10% (higher better)",
+        "sufficiency_at_20": "Sufficiency@20% (higher better)",
+        "sufficiency_gap_at_10": "Sufficiency Gap@10% (lower better)",
+        "sufficiency_gap_at_20": "Sufficiency Gap@20% (lower better)",
+        "comprehensiveness_at_10": "Comprehensiveness@10% (higher better)",
+        "comprehensiveness_at_20": "Comprehensiveness@20% (higher better)",
+        "sensitivity_n_corr": "Sensitivity-n Corr (higher better)",
+        "stability_top10_jaccard": "Top-10 Stability (higher better)",
+    }
+
+    n_cols = 4
+    n_rows = int(np.ceil(len(metric_columns) / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4.6 * n_cols, 3.5 * n_rows), squeeze=False)
+
+    for ax, metric in zip(axes.flat, metric_columns):
+        values, labels = [], []
+        for method in methods:
+            method_values = pd.to_numeric(
+                auc_all.loc[auc_all["method"].astype(str) == method, metric],
+                errors="coerce",
+            ).dropna().values
+            if len(method_values) > 0:
+                values.append(method_values)
+                labels.append(method)
+
+        if values:
+            ax.boxplot(values, tick_labels=labels, showmeans=True, patch_artist=True)
+            ax.tick_params(axis="x", rotation=25)
+        else:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+            ax.set_xticks([])
+        ax.set_title(metric_titles.get(metric, metric))
+        ax.grid(axis="y", alpha=0.25)
+
+    for ax in axes.flat[len(metric_columns):]:
+        ax.axis("off")
+
+    plt.suptitle(f"No-Ground-Truth Faithfulness Metrics Across {no_images} Images & Budget: {max_evals}", fontsize=16)
+    plt.tight_layout()
+    out_path = path_results / f"faithfulness_metric_boxplots_{max_evals}_{no_images}.png"
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved faithfulness metric box plots: {out_path}")
+    return out_path
+
+
 def aggregate_auc_outputs(auc_all_df: pd.DataFrame, partition_summary_df: pd.DataFrame, path_results: Path, max_evals: int):
     no_images = len(auc_all_df["image_no"].unique())
     auc_all = auc_all_df.copy()
@@ -671,6 +733,7 @@ def aggregate_auc_outputs(auc_all_df: pd.DataFrame, partition_summary_df: pd.Dat
     print(f"Saved aggregate AUC table: {auc_all_path}")
     print(f"Saved aggregate summary: {auc_summary_path}")
     print(f"Saved box plot: {box_plot_path}")
+    save_faithfulness_metric_boxplots(auc_all, path_results, max_evals, no_images)
     return auc_all, summary
 
 
@@ -860,6 +923,7 @@ def build_xai_results_webpage(xai_results_root: Path):
     auc_all_path = latest_matching_file(xai_results_root, "auc_results_all_images_*.csv")
     auc_summary_path = latest_matching_file(xai_results_root, "auc_results_summary_*.csv")
     auc_boxplot_path = latest_matching_file(xai_results_root, "auc_results_boxplots_*.png")
+    faithfulness_boxplot_path = latest_matching_file(xai_results_root, "faithfulness_metric_boxplots_*.png")
     auc_all_df = pd.read_csv(auc_all_path) if auc_all_path is not None else pd.DataFrame()
     auc_summary_df = pd.read_csv(auc_summary_path) if auc_summary_path is not None else pd.DataFrame()
     if not auc_all_df.empty:
@@ -984,6 +1048,10 @@ def build_xai_results_webpage(xai_results_root: Path):
   <figure>
     <figcaption>Aggregate AUC box plot</figcaption>
     {image_tag(auc_boxplot_path, 'Aggregate AUC box plot')}
+  </figure>
+  <figure>
+    <figcaption>No-ground-truth faithfulness metric box plots</figcaption>
+    {image_tag(faithfulness_boxplot_path, 'Faithfulness metric box plots')}
   </figure>
   <h3>Aggregate Summary</h3>
   <div class="table-scroll small-scroll">{dataframe_to_html_table(auc_summary_df)}</div>
